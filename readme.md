@@ -1,6 +1,8 @@
 ## MACHINA
 CCTV viewer with realtime object tagger [WIP]
 
+![partial screenshot](demo.png)
+
 ### Uses
 - [LLAVA](https://llava-vl.github.io)
 - [YOLO 11](https://github.com/ultralytics/ultralytics)
@@ -39,9 +41,9 @@ have a frame skip mechanism on 3 seconds of detection idle.
 - Run the script ```py app.py```
 
 ### Shortcuts
-S : snapshot, actual image from input stream
-R : start/stop recording. it records what you see.
-Q : quit app
+- S : snapshot, actual image from input stream
+- R : start/stop recording. it records what you see.
+- Q : quit app
 
 ### Project direction
 This is a living project, trying to create a *complete* headless security system by
@@ -50,10 +52,10 @@ taking advantage of modern vision, object detection models on my spare time.
 Feel free to contribute with code, ideas or even maybe a little bit donation
 via ko-fi or bitcoin
 
-[https://ko-fi.com/psychip](https://ko-fi.com/psychip)
-BTC: bc1qlq067vldngs37l5a4yjc4wvhyt89wv3u68dsuv
+-[https://ko-fi.com/psychip](https://ko-fi.com/psychip)
+-BTC: bc1qlq067vldngs37l5a4yjc4wvhyt89wv3u68dsuv
 
 Created by PsyChip
-root@psychip.net
+- root@psychip.net
 
 .eof
