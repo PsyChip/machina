@@ -15,8 +15,8 @@ import requests
 import json
 
 model = "yolo11s"
-rtsp_stream = "rtsp://user@password@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
-ollama = "http://127.0.0.1:11434/api/generate"
+rtsp_stream = "rtsp://psychip:neuromancer1@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
+ollama = "http://magdalena:11434/api/generate"
 
 #rtsp_stream = "VID_20231227_172247.mp4"
 labels = open("coco.names").read().strip().split("\n")
@@ -56,24 +56,49 @@ out = None
 opsize = (640,480)
 streamsize = (0,0)
 
+zoom_factor = 1.0
+pan_x = 0
+pan_y = 0
+dragging = False
+drag_start_x = 0
+drag_start_y = 0
+
+padding = 6#px padding on each element
+
 def preinit():
     for folder in ["elements","models","recordings","snapshots"]:
         if not os.path.exists(folder):
             os.makedirs(folder)
             print(f"-- created folder: {folder}")
             
-def transform(xmin, ymin, xmax, ymax):
+def transform(xmin, ymin, xmax, ymax,pad):
     x_scale = streamsize[0] / opsize[0]
     y_scale = streamsize[1] / opsize[1]
     
-    new_xmin = int(xmin * x_scale)
-    new_ymin = int(ymin * y_scale)
-    new_xmax = int(xmax * x_scale)
-    new_ymax = int(ymax * y_scale)    
+    new_xmin = int(xmin * x_scale)-pad
+    new_ymin = int(ymin * y_scale)-pad
+    new_xmax = int(xmax * x_scale)+pad
+    new_ymax = int(ymax * y_scale)+pad
     return (new_xmin, new_ymin, new_xmax, new_ymax)
-    
+
 def resample(frame):
-    return cv2.resize(frame, opsize, interpolation=cv2.INTER_AREA)
+    global zoom_factor, pan_x, pan_y, streamsize, opsize
+    
+    zoomed_width = int(streamsize[0] / zoom_factor)
+    zoomed_height = int(streamsize[1] / zoom_factor)
+    
+    center_x = streamsize[0] // 2 + pan_x
+    center_y = streamsize[1] // 2 + pan_y
+    
+    start_x = max(0, min(streamsize[0] - zoomed_width, center_x - zoomed_width // 2))
+    start_y = max(0, min(streamsize[1] - zoomed_height, center_y - zoomed_height // 2))
+    
+    zoomed_frame = frame[start_y:start_y+zoomed_height, start_x:start_x+zoomed_width]
+    
+    return cv2.resize(zoomed_frame, opsize, interpolation=cv2.INTER_AREA)
+    
+#def resample(frame):
+#    return cv2.resize(frame, opsize, interpolation=cv2.INTER_AREA)
     
 def rest(url, payload):
     headers = {'Content-Type':'application/json'}
@@ -171,7 +196,49 @@ def match(img1, img2):
      #print(f"An error occurred: {e}")
     finally:
       return max_val
+      
+def open_app_folder():
+    app_folder = os.path.dirname(os.path.abspath(__file__))
+    if os.name == 'nt':  # Windows
+        os.startfile(app_folder)
+    elif os.name == 'posix':  # macOS and Linux
+        subprocess.call(['open' if os.name == 'darwin' else 'xdg-open', app_folder])
+
+def mouse_callback(event, x, y, flags, param):
+    global dragging,drag_start_x,drag_start_y,zoom_factor,pan_x, pan_y,zoom_x,zoom_y
+    if event == cv2.EVENT_LBUTTONDOWN:
+          dragging = True
+          drag_start_x = x
+          drag_start_y = y
+            
+    if event == cv2.EVENT_LBUTTONUP:
+        dragging = False
     
+    if event == cv2.EVENT_MOUSEWHEEL:
+        zoom_x = x
+        zoom_y = y
+        
+        if flags > 0:
+            zoom_factor = min(6.0, zoom_factor * 1.1)
+        else:
+            zoom_factor = max(1.0, zoom_factor / 1.1)
+        
+    if event == cv2.EVENT_MOUSEMOVE:
+        if dragging:
+            dx = x - drag_start_x
+            dy = y - drag_start_y
+            
+            pan_x -= int(dx * zoom_factor)
+            pan_y -= int(dy * zoom_factor)
+            
+            drag_start_x = x
+            drag_start_y = y
+            
+        
+    if event == cv2.EVENT_RBUTTONUP:
+            print("-- Opening app folder..")
+            threading.Thread(target=open_app_folder).start()
+        
 class BoundingBox:
     def __init__(self, name, points, size, image, buffer=stationary_val):
         global obj_number
@@ -459,6 +526,8 @@ streamsize = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),int(cap.get(cv2.CAP_PROP_FR
 cv2.namedWindow(str(rtsp_stream) , cv2.WINDOW_NORMAL)
 cv2.resizeWindow(str(rtsp_stream), opsize[0], opsize[1])
 cv2.setWindowProperty(str(rtsp_stream), cv2.WND_PROP_TOPMOST, 1)
+cv2.setMouseCallback(str(rtsp_stream), mouse_callback) 
+
 q = queue.Queue(maxsize=buffer)
 
 def stream():
@@ -480,6 +549,44 @@ def stream():
              print("Can't receive frame (stream end?). Restarting video...")
              cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
+def fmatch(img1, img2):
+    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+
+    orb = cv2.ORB_create()
+    kp1, des1 = orb.detectAndCompute(gray1, None)
+    kp2, des2 = orb.detectAndCompute(gray2, None)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(des1, des2)
+    matches = sorted(matches, key=lambda x: x.distance)
+    img_matches = cv2.drawMatches(img1, kp1, img2, kp2, matches[:50], None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
+
+    src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+    dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+    M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+
+    h, w = gray2.shape
+    aligned_img1 = cv2.warpPerspective(img1, M, (w, h))
+
+    diff = cv2.absdiff(cv2.cvtColor(aligned_img1, cv2.COLOR_BGR2GRAY), gray2)
+
+    _, thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+
+    kernel = np.ones((5,5), np.uint8)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    img1_contours = aligned_img1.copy()
+    img2_contours = img2.copy()
+
+    for contour in contours:
+        if cv2.contourArea(contour) > 100:
+            cv2.drawContours(img1_contours, [contour], 0, (0, 0, 255), 2)
+            cv2.drawContours(img2_contours, [contour], 0, (0, 255, 0), 2)
+
+            
 def process(img):
     photo = img.copy()
     img = resample(img)
@@ -607,7 +714,7 @@ def process(img):
        cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
        cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
        
-       qxmin,qymin,qxmax,qymax = transform(xmin,ymin,xmax,ymax)
+       qxmin,qymin,qxmax,qymax = transform(xmin,ymin,xmax,ymax,padding)
        snap = photo[qymin:qymax, qxmin:qxmax]
        item = BoundingBox(class_name,point,size,snap)    
        bounding_boxes.append(item)
@@ -727,8 +834,8 @@ while loop:
         fskip = False
         time.sleep(0.001)
 
-bthread.join()
-sthread.join()
+#bthread.join()
+#sthread.join()
 
 cv2.destroyAllWindows()
 print("Terminating..") 
