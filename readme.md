@@ -52,10 +52,10 @@ taking advantage of modern vision, object detection models on my spare time.
 Feel free to contribute with code, ideas or even maybe a little bit donation
 via ko-fi or bitcoin
 
--[https://ko-fi.com/psychip](https://ko-fi.com/psychip)
--BTC: bc1qlq067vldngs37l5a4yjc4wvhyt89wv3u68dsuv
+- [https://ko-fi.com/psychip](https://ko-fi.com/psychip)
+- BTC: ```bc1qlq067vldngs37l5a4yjc4wvhyt89wv3u68dsuv```
 
 Created by PsyChip
-- root@psychip.net
+```root@psychip.net```
 
 .eof

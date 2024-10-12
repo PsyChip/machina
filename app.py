@@ -13,13 +13,19 @@ import torchvision
 import base64
 import requests
 import json
+import pickle
 
-model = "yolo11s"
+import torch.nn as nn
+from vdb import VectorDatabase
+
+model = "yolo11n"
 rtsp_stream = "rtsp://psychip:neuromancer1@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
 ollama = "http://magdalena:11434/api/generate"
 
 #rtsp_stream = "VID_20231227_172247.mp4"
-labels = open("coco.names").read().strip().split("\n")
+
+vsize = 256 # yolo11n:256 yolo11s:512
+
 buffer = 512
 idle_reset = 3000
 min_confidence = 0.15
@@ -35,7 +41,8 @@ class_confidence = {
 "train":0.85,
 "chair":0.5,
 "parking meter":0.9,
-"fire hydrant":0.65
+"fire hydrant":0.65,
+"traffic light":0.65
 }
 
 prompts = {
@@ -65,6 +72,65 @@ drag_start_y = 0
 
 padding = 6#px padding on each element
 
+def resolve(file_path):
+    if os.path.isabs(file_path):
+        directory = os.path.dirname(file_path)
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        return file_path
+    else:
+        directory = os.path.dirname(file_path)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
+        return os.path.abspath(file_path)
+       
+"""       
+def extract_features(img_tensor, model, boxes):
+    features = []
+    feature_extractor = nn.Sequential(*list(model.model.model[:10])).to(device)
+    
+    with torch.no_grad():
+        feature_maps = feature_extractor(img_tensor)
+    
+    box_tensors = torch.tensor([box.xyxy[0] for box in boxes]).to(device)    
+    for box in box_tensors:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])        
+        stride = img_tensor.shape[2] / feature_maps.shape[2] 
+        fm_x1, fm_y1 = int(x1 / stride), int(y1 / stride)
+        fm_x2, fm_y2 = int(x2 / stride), int(y2 / stride)
+        
+        box_features = feature_maps[:, :, fm_y1:fm_y2, fm_x1:fm_x2]        
+        box_features = nn.functional.adaptive_avg_pool2d(box_features, (1, 1))
+        features.append(box_features.flatten().cpu().numpy())    
+    return features
+"""
+
+def extract_features(img_tensor, model, boxes):
+    features = []
+    feature_extractor = nn.Sequential(*list(model.model.model[:10])).to(device)
+    
+    with torch.no_grad():
+        feature_maps = feature_extractor(img_tensor)
+    
+    for box in boxes:
+        if hasattr(box, 'xyxy') and isinstance(box.xyxy, torch.Tensor):
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+        elif hasattr(box, 'xyxy') and isinstance(box.xyxy, list):
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+        else:
+            print(f"Unexpected box format: {type(box)}")
+            continue
+
+        stride = img_tensor.shape[2] / feature_maps.shape[2] 
+        fm_x1, fm_y1 = int(x1 / stride), int(y1 / stride)
+        fm_x2, fm_y2 = int(x2 / stride), int(y2 / stride)
+        
+        box_features = feature_maps[:, :, fm_y1:fm_y2, fm_x1:fm_x2]        
+        box_features = nn.functional.adaptive_avg_pool2d(box_features, (1, 1))
+        features.append(box_features.flatten().cpu().numpy())
+    
+    return features
+    
 def preinit():
     for folder in ["elements","models","recordings","snapshots"]:
         if not os.path.exists(folder):
@@ -92,6 +158,7 @@ def resample(frame):
     
     start_x = max(0, min(streamsize[0] - zoomed_width, center_x - zoomed_width // 2))
     start_y = max(0, min(streamsize[1] - zoomed_height, center_y - zoomed_height // 2))
+    
     
     zoomed_frame = frame[start_y:start_y+zoomed_height, start_x:start_x+zoomed_width]
     
@@ -122,6 +189,7 @@ def millis():
 def timestamp():
  return int(time.time())
 
+labels = open(resolve("db/coco.names")).read().strip().split("\n")
 object_count = 0
 old_count = 0
 obj_break = millis()
@@ -140,6 +208,22 @@ stationary_val = 16
 
 obj_number = 1
 
+def save_bounding_boxes(bounding_boxes, filename="db/bounding_boxes.pkl"):
+    with open(resolve(filename), 'wb') as f:
+        pickle.dump(bounding_boxes, f)
+    print(f"Saved {len(bounding_boxes)} bounding boxes to {filename}")
+
+def load_bounding_boxes(filename="db/bounding_boxes.pkl"):
+    filename = resolve(filename)
+    if os.path.exists(filename):
+        with open(filename, 'rb') as f:
+            bounding_boxes = pickle.load(f)
+        print(f"Loaded {len(bounding_boxes)} bounding boxes from {filename}")
+        return bounding_boxes
+    else:
+        print(f"No saved bounding boxes found at {filename}")
+        return []
+        
 def crc32(string):
     crc = 0xFFFFFFFF
     for char in string:
@@ -240,14 +324,13 @@ def mouse_callback(event, x, y, flags, param):
             threading.Thread(target=open_app_folder).start()
         
 class BoundingBox:
-    def __init__(self, name, points, size, image, buffer=stationary_val):
+    def __init__(self, name, points, size, image,features):
         global obj_number
         self.nr = obj_number
         obj_number +=1
         self.x, self.y = points
         self.px=0
         self.py=0
-        self.buffer = buffer       
         self.created = millis()
         self.timestamp = self.created
         self.size = size
@@ -261,11 +344,25 @@ class BoundingBox:
         self.desc = False
         self.state = 0
         self.seen = self.created
-       
+        self.features = features
+        
         self.init()
         print("New object: "+self.name+"#"+str(self.nr)+" size:"+str(self.size))
         self.save("elements/"+self.name+"-"+str(self.nr)+".png")
+        vector_db.add_vector(self.features, {
+                'class': self.name,
+                'sid': self.sid
+            })
     
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state['image']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.image = None
+        
     def see(self):
      self.seen = millis()
      
@@ -287,10 +384,10 @@ class BoundingBox:
      return base64_image
     
     def init(self):
-     self.min_x = self.x - self.buffer
-     self.max_x = self.x + self.buffer
-     self.min_y = self.y - (self.buffer)
-     self.max_y = self.y + (self.buffer)
+     self.min_x = self.x - stationary_val
+     self.max_x = self.x + stationary_val
+     self.min_y = self.y - (stationary_val)
+     self.max_y = self.y + (stationary_val)
            
     def contains(self, x, y):
         return ((self.checkin == False) and self.min_x <= x <= self.max_x) and (self.min_y <= y <= self.max_y)
@@ -326,13 +423,13 @@ def closest(bounding_boxes, reference_point, class_name, size):
     min_distance = float('inf')
  
     for bbox in bounding_boxes:
-        if(bbox.idle>=3 or abs(bbox.size-size)>10):
+        if(abs(bbox.size-size)>10):
          continue
         
         dx = bbox.x - reference_point[0]
         dy = bbox.y - reference_point[1]
         distance = math.sqrt(dx*dx + dy*dy)
-        if(distance<3 or distance > 200):
+        if(distance<1 or distance > 300):
          continue        
          
         if distance < min_distance:
@@ -512,6 +609,12 @@ model = YOLO("models/"+model+".pt")
 print(f"Loading model to {device}")
 model.to(device)
 
+print("initializing vector store")
+vector_db = VectorDatabase(vector_dimension=vsize)
+
+print("loading objects")
+bounding_boxes = load_bounding_boxes()
+
 loop = True
 cap = cv2.VideoCapture(rtsp_stream)
 
@@ -529,6 +632,7 @@ cv2.setWindowProperty(str(rtsp_stream), cv2.WND_PROP_TOPMOST, 1)
 cv2.setMouseCallback(str(rtsp_stream), mouse_callback) 
 
 q = queue.Queue(maxsize=buffer)
+v = queue.Queue(maxsize=buffer)
 
 def stream():
     global cap, obj_idle, last_fskip, idle
@@ -544,7 +648,7 @@ def stream():
                  fskip = True
                  print(f"Frame skip")
                 else:
-                 q.put(frame)             
+                 q.put(frame)
             else:
              print("Can't receive frame (stream end?). Restarting video...")
              cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -585,8 +689,42 @@ def fmatch(img1, img2):
         if cv2.contourArea(contour) > 100:
             cv2.drawContours(img1_contours, [contour], 0, (0, 0, 255), 2)
             cv2.drawContours(img2_contours, [contour], 0, (0, 255, 0), 2)
+ 
+def selectObject(sid,x,y):
+    i = 0
+    while i < len(bounding_boxes):
+        bbox = bounding_boxes[i]
+        if bbox.sid == sid:            
+         bbox.update(millis(),x,y)
+         return bbox       
+        else:
+         i += 1
+         
+    return False
+    
+def find_similar_objects(query_vector, class_name, k=5):
+    #print(len(query_vector))
 
-            
+    results = vector_db.search_similar(query_vector, k)
+    #unchecked = get_unchecked_boxes(bounding_boxes)
+    
+    _sid = False;
+    _c=25;
+    
+    for metadata, distance in results:
+        if(distance >= 4):
+         continue;
+
+        if(distance<_c):
+         _c=distance
+         _sid = metadata['sid']
+        
+        print(f"SID: {metadata['sid']}")
+        print(f"Distance: {distance}")
+        print("---")
+    return _sid
+ 
+        
 def process(img):
     photo = img.copy()
     img = resample(img)
@@ -602,11 +740,11 @@ def process(img):
     c = 0;
     
     boxes = [box for r in results for box in r.boxes]    
-    
+    features = extract_features(img_tensor, model, boxes)
     now = millis()
     resetIteration()
  
-    for box in boxes:
+    for i, box in enumerate(boxes):
      class_id = int(box.cls)
      class_name = labels[class_id]
      confidence = float(box.conf)
@@ -652,7 +790,9 @@ def process(img):
      
      point = center(xmin,ymin,xmax,ymax)
      size = _size(xmin,ymin,xmax,ymax)
-          
+     
+     #find_similar_objects(features[i]);
+     
      obj = getObject(point,class_name);
      if(obj != False):
       obj.see()
@@ -672,11 +812,8 @@ def process(img):
       
      else:     
       obj = closestEx(bounding_boxes,point,class_name,size)
-      #obj = findMatch(snap)
-       
       if(obj != False):
        print("picked up "+str(obj.nr)+"#"+obj.name+" from "+str(obj.distance))
-       #print("found visual match: "+obj.name+"#"+str(obj.nr))
        cv2.line(img, point, (obj.x, obj.y), (0, 255, 255), 4)
        obj.see()
        
@@ -697,27 +834,50 @@ def process(img):
        text = f"{class_name}"+" "+str(round(confidence, 6))         
        text_offset_x = xmin
        text_offset_y = ymin - 5
-       """
-       color = colors[class_id].tolist()
-       alpha = 0.35
-       color_with_alpha = color + [alpha]
-              
-       overlay = img[ymin:ymax+1, xmin:xmax+1].copy()
-       cv2.rectangle(overlay, (0, 0), (xmax-xmin, ymax-ymin), color_with_alpha, thickness=-1)
-       cv2.addWeighted(overlay, alpha, img[ymin:ymax+1, xmin:xmax+1], 1 - alpha, 0, img[ymin:ymax+1, xmin:xmax+1])
-       draw_dashed_rectangle(img,(xmin, ymin),(xmax, ymax),color,1,8)
-    
-       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-       """
-       cv2.circle(img, point, 1, (255, 255, 0), 2)
-       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
        
-       qxmin,qymin,qxmax,qymax = transform(xmin,ymin,xmax,ymax,padding)
-       snap = photo[qymin:qymax, qxmin:qxmax]
-       item = BoundingBox(class_name,point,size,snap)    
-       bounding_boxes.append(item)
+       _sid = find_similar_objects(features[i],class_name)
+       if(_sid != False):
+        obj = selectObject(_sid,point[0],point[1])
+        if(obj != False):
+         #print("restored "+str(obj.nr)+"#"+obj.name+"#"+str(obj.desc)+" from vector store")
+         cv2.line(img, point, (obj.px, obj.py), (0, 255, 0), 4)
+         cv2.circle(img, point, 1, (0, 255, 0), 3)
+         obj.see()
+         sid = obj.desc if obj.desc != False else obj.name + "#" + str(obj.nr)
+         cv2.putText(img, sid, (obj.x,obj.y - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
+         cv2.putText(img, sid, (obj.x,obj.y - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+         idle = str(obj.idle)+"s"
+         cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
+         cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+        else:
+         cv2.circle(img, point, 1, (255, 255, 0), 2) 
+         cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
+         cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+         qxmin,qymin,qxmax,qymax = transform(xmin,ymin,xmax,ymax,padding)
+         snap = photo[qymin:qymax, qxmin:qxmax]
+         item = BoundingBox(class_name,point,size,snap,features[i])    
+         bounding_boxes.append(item)
+       else:
+        cv2.circle(img, point, 1, (255, 255, 0), 2) 
+        cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
+        cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+        qxmin,qymin,qxmax,qymax = transform(xmin,ymin,xmax,ymax,padding)
+        snap = photo[qymin:qymax, qxmin:qxmax]
+        item = BoundingBox(class_name,point,size,snap,features[i])    
+        bounding_boxes.append(item)
+         
+#       color = colors[class_id].tolist()
+#       alpha = 0.35
+#       color_with_alpha = color + [alpha]
+              
+#       overlay = img[ymin:ymax+1, xmin:xmax+1].copy()
+#       cv2.rectangle(overlay, (0, 0), (xmax-xmin, ymax-ymin), color_with_alpha, thickness=-1)
+#       cv2.addWeighted(overlay, alpha, img[ymin:ymax+1, xmin:xmax+1], 1 - alpha, 0, img[ymin:ymax+1, xmin:xmax+1])
+#       draw_dashed_rectangle(img,(xmin, ymin),(xmax, ymax),color,1,8)
+    
+#       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
+#       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+       
     
     for obj in bounding_boxes:
      if(obj.checkin==False and obj.detections>=3 and obj.idle>0):
@@ -744,7 +904,7 @@ def postreview():
     global bounding_boxes, loop
     while loop:
         for box in bounding_boxes:
-            if box.state == 0:
+            if (box.state == 0) and (box.image is not None):
                 res = rest(ollama, {
                     "model": "llava",
                     "prompt": genprompt(box.name),
@@ -795,8 +955,8 @@ while loop:
         if(millis()-last_frame>=250):
          fps = (frames-prev_frames)*4 
          prev_frames = frames
-         last_frame = millis()
-    
+         last_frame = millis()         
+        
         _fps = "FPS: "+str(fps)
         text_size = cv2.getTextSize(_fps, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]    
         text_x = 16
@@ -834,8 +994,15 @@ while loop:
         fskip = False
         time.sleep(0.001)
 
+print("saving vector index..")
+vector_db.save_index()
+
+print("saving found objects..")
+save_bounding_boxes(bounding_boxes)
+
 #bthread.join()
 #sthread.join()
 
+print("closing cv window..") 
 cv2.destroyAllWindows()
-print("Terminating..") 
+print("terminating..") 
