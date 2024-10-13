@@ -18,21 +18,21 @@ import pickle
 import torch.nn as nn
 from vdb import VectorDatabase
 
-model = "yolo11n"
+model = "yolo11s"
 rtsp_stream = "rtsp://psychip:neuromancer1@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
 ollama = "http://magdalena:11434/api/generate"
 
 #rtsp_stream = "VID_20231227_172247.mp4"
 
-vsize = 256 # yolo11n:256 yolo11s:512
+vsize = 512 # yolo11n:256 yolo11s:512
 
 buffer = 512
 idle_reset = 3000
 min_confidence = 0.15
 min_size = 20
 class_confidence = {
-"truck":0.35,
-"car":0.25,
+"truck":0.25,
+"car":0.15,
 "boat":0.85,
 "bus":0.5,
 "aeroplane":0.85,
@@ -49,6 +49,7 @@ prompts = {
 "person": "get gender and age of this person in 5 words or less",
 "car": "get body type and color of this car in 5 words or less"
 }
+
 snapshot_directory = "snapshots"
 
 frames = 0
@@ -66,12 +67,21 @@ streamsize = (0,0)
 zoom_factor = 1.0
 pan_x = 0
 pan_y = 0
+drawing = False
 dragging = False
 drag_start_x = 0
 drag_start_y = 0
 
-padding = 6#px padding on each element
+draw_start_x = 0
+draw_start_y = 0
 
+draw_end_x = 0
+draw_end_y = 0
+
+uispace = 0 #300
+
+padding = 6#px padding on each element
+        
 def resolve(file_path):
     if os.path.isabs(file_path):
         directory = os.path.dirname(file_path)
@@ -84,27 +94,6 @@ def resolve(file_path):
             os.makedirs(directory)
         return os.path.abspath(file_path)
        
-"""       
-def extract_features(img_tensor, model, boxes):
-    features = []
-    feature_extractor = nn.Sequential(*list(model.model.model[:10])).to(device)
-    
-    with torch.no_grad():
-        feature_maps = feature_extractor(img_tensor)
-    
-    box_tensors = torch.tensor([box.xyxy[0] for box in boxes]).to(device)    
-    for box in box_tensors:
-        x1, y1, x2, y2 = map(int, box.xyxy[0])        
-        stride = img_tensor.shape[2] / feature_maps.shape[2] 
-        fm_x1, fm_y1 = int(x1 / stride), int(y1 / stride)
-        fm_x2, fm_y2 = int(x2 / stride), int(y2 / stride)
-        
-        box_features = feature_maps[:, :, fm_y1:fm_y2, fm_x1:fm_x2]        
-        box_features = nn.functional.adaptive_avg_pool2d(box_features, (1, 1))
-        features.append(box_features.flatten().cpu().numpy())    
-    return features
-"""
-
 def extract_features(img_tensor, model, boxes):
     features = []
     feature_extractor = nn.Sequential(*list(model.model.model[:10])).to(device)
@@ -155,17 +144,13 @@ def resample(frame):
     
     center_x = streamsize[0] // 2 + pan_x
     center_y = streamsize[1] // 2 + pan_y
-    
+            
     start_x = max(0, min(streamsize[0] - zoomed_width, center_x - zoomed_width // 2))
     start_y = max(0, min(streamsize[1] - zoomed_height, center_y - zoomed_height // 2))
-    
     
     zoomed_frame = frame[start_y:start_y+zoomed_height, start_x:start_x+zoomed_width]
     
     return cv2.resize(zoomed_frame, opsize, interpolation=cv2.INTER_AREA)
-    
-#def resample(frame):
-#    return cv2.resize(frame, opsize, interpolation=cv2.INTER_AREA)
     
 def rest(url, payload):
     headers = {'Content-Type':'application/json'}
@@ -203,7 +188,7 @@ app_start = timestamp()
 obj_score = labels
 
 bounding_boxes = []
-point_timeout = 8000
+point_timeout = 2500
 stationary_val = 16
 
 obj_number = 1
@@ -289,25 +274,40 @@ def open_app_folder():
         subprocess.call(['open' if os.name == 'darwin' else 'xdg-open', app_folder])
 
 def mouse_callback(event, x, y, flags, param):
-    global dragging,drag_start_x,drag_start_y,zoom_factor,pan_x, pan_y,zoom_x,zoom_y
-    if event == cv2.EVENT_LBUTTONDOWN:
+    global drawing,draw_start_x,draw_start_y,draw_end_x,draw_end_y, dragging,drag_start_x,drag_start_y,zoom_factor,pan_x, pan_y,zoom_x,zoom_y
+    if event == cv2.EVENT_RBUTTONDOWN:
           dragging = True
           drag_start_x = x
-          drag_start_y = y
+          drag_start_y = y         
             
-    if event == cv2.EVENT_LBUTTONUP:
+    if event == cv2.EVENT_RBUTTONUP:
         dragging = False
     
-    if event == cv2.EVENT_MOUSEWHEEL:
-        zoom_x = x
-        zoom_y = y
+    if event == cv2.EVENT_LBUTTONUP:
+        drawing = False
+        draw_end_x = 0
+        draw_end_y = 0
+        draw_start_x = 0
+        draw_start_y = 0
         
+    if event == cv2.EVENT_LBUTTONDOWN:
+        drawing = True
+        draw_end_x = 0
+        draw_end_y = 0
+        draw_start_x = x
+        draw_start_y = y
+    
+    if event == cv2.EVENT_MOUSEWHEEL: 
         if flags > 0:
             zoom_factor = min(6.0, zoom_factor * 1.1)
         else:
             zoom_factor = max(1.0, zoom_factor / 1.1)
         
     if event == cv2.EVENT_MOUSEMOVE:
+        if drawing:
+            draw_end_x = x
+            draw_end_y = y
+        
         if dragging:
             dx = x - drag_start_x
             dy = y - drag_start_y
@@ -318,10 +318,6 @@ def mouse_callback(event, x, y, flags, param):
             drag_start_x = x
             drag_start_y = y
             
-        
-    if event == cv2.EVENT_RBUTTONUP:
-            print("-- Opening app folder..")
-            threading.Thread(target=open_app_folder).start()
         
 class BoundingBox:
     def __init__(self, name, points, size, image,features):
@@ -345,15 +341,23 @@ class BoundingBox:
         self.state = 0
         self.seen = self.created
         self.features = features
+        self.visible = True
         
         self.init()
         print("New object: "+self.name+"#"+str(self.nr)+" size:"+str(self.size))
         self.save("elements/"+self.name+"-"+str(self.nr)+".png")
+        
         vector_db.add_vector(self.features, {
                 'class': self.name,
                 'sid': self.sid
             })
+        
+    def hide(self):
+        self.visible = False
     
+    def show(self):
+        self.visible = True
+        
     def __getstate__(self):
         state = self.__dict__.copy()
         del state['image']
@@ -489,26 +493,22 @@ def closestEx(bounding_boxes, reference_point,class_name,size):
   print("iteration "+str(i))
   
  return found[-1]
-  
+
 def getObject(point,cname):
     global bounding_boxes
     x, y = point
     time = millis()
-    
-    i = 0
-    while i < len(bounding_boxes):
-        bbox = bounding_boxes[i]
-        if(cname!=bbox.name):
-         i +=1      
+
+    for i, box in enumerate(bounding_boxes):
+        if(cname!=box.name):
          continue
 
-        if bbox.contains(x, y):            
-         bbox.update(time,x,y)
-         return bbox       
-        if (time-bbox.seen) >= point_timeout:
-           del bounding_boxes[i]
-        else:
-            i += 1
+        if box.contains(x, y):            
+         box.update(time,x,y)
+         return box 
+         
+        if (time-box.seen) >= point_timeout:
+          box.hide()
 
     return False
 
@@ -625,14 +625,15 @@ if(rtsp_stream==0):
 fps = cap.get(cv2.CAP_PROP_FPS)
 ret, img = cap.read()
 
+window = str(rtsp_stream)
 streamsize = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-cv2.namedWindow(str(rtsp_stream) , cv2.WINDOW_NORMAL)
-cv2.resizeWindow(str(rtsp_stream), opsize[0], opsize[1])
-cv2.setWindowProperty(str(rtsp_stream), cv2.WND_PROP_TOPMOST, 1)
-cv2.setMouseCallback(str(rtsp_stream), mouse_callback) 
+
+cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+cv2.resizeWindow(window, opsize[0]+uispace, opsize[1])
+cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)
+cv2.setMouseCallback(window, mouse_callback) 
 
 q = queue.Queue(maxsize=buffer)
-v = queue.Queue(maxsize=buffer)
 
 def stream():
     global cap, obj_idle, last_fskip, idle
@@ -693,6 +694,7 @@ def fmatch(img1, img2):
 def selectObject(sid,x,y):
     i = 0
     while i < len(bounding_boxes):
+        print(i)
         bbox = bounding_boxes[i]
         if bbox.sid == sid:            
          bbox.update(millis(),x,y)
@@ -703,10 +705,7 @@ def selectObject(sid,x,y):
     return False
     
 def find_similar_objects(query_vector, class_name, k=5):
-    #print(len(query_vector))
-
     results = vector_db.search_similar(query_vector, k)
-    #unchecked = get_unchecked_boxes(bounding_boxes)
     
     _sid = False;
     _c=25;
@@ -719,9 +718,9 @@ def find_similar_objects(query_vector, class_name, k=5):
          _c=distance
          _sid = metadata['sid']
         
-        print(f"SID: {metadata['sid']}")
-        print(f"Distance: {distance}")
-        print("---")
+        #print(f"SID: {metadata['sid']}")
+        #print(f"Distance: {distance}")
+        #print("---")
     return _sid
  
         
@@ -765,34 +764,33 @@ def process(img):
      
      if(class_name=="car" and ((width>height and (width/height)>=2) or (width<min_size or height<min_size))):
       continue
-            
+     
      """
-     color = colors[class_id].tolist()
-     alpha = 0.35
-     color_with_alpha = color + [alpha]
+     if(zoom_factor > 1.0):
+        color = colors[class_id].tolist()
+        alpha = 0.35
+        color_with_alpha = color + [alpha]
               
-     text = f"{class_name}"+" "+str(round(confidence, 6))         
-     text_offset_x = xmin
-     text_offset_y = ymin - 5
+        text = f"{class_name}"+" "+str(round(confidence, 6))         
+        text_offset_x = xmin
+        text_offset_y = ymin - 5
         
-     overlay = img[ymin:ymax+1, xmin:xmax+1].copy()
-     cv2.rectangle(overlay, (0, 0), (xmax-xmin, ymax-ymin), color_with_alpha, thickness=-1)
-     cv2.addWeighted(overlay, alpha, img[ymin:ymax+1, xmin:xmax+1], 1 - alpha, 0, img[ymin:ymax+1, xmin:xmax+1])
-     draw_dashed_rectangle(img,(xmin, ymin),(xmax, ymax),color,1,8)
+        overlay = img[ymin:ymax+1, xmin:xmax+1].copy()
+        cv2.rectangle(overlay, (0, 0), (xmax-xmin, ymax-ymin), color_with_alpha, thickness=-1)
+        cv2.addWeighted(overlay, alpha, img[ymin:ymax+1, xmin:xmax+1], 1 - alpha, 0, img[ymin:ymax+1, xmin:xmax+1])
+        draw_dashed_rectangle(img,(xmin, ymin),(xmax, ymax),color,1,8)
     
-     cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-     cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-     continue
-     """
-        
+        cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
+        cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+        continue
+     """  
      idx = class_id
      obj_score[idx] = obj_score[idx]+1 
      
      point = center(xmin,ymin,xmax,ymax)
      size = _size(xmin,ymin,xmax,ymax)
      
-     #find_similar_objects(features[i]);
-     
+     print("getobject")
      obj = getObject(point,class_name);
      if(obj != False):
       obj.see()
@@ -810,7 +808,8 @@ def process(img):
       cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
       cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
       
-     else:     
+     else:
+      print("closest")
       obj = closestEx(bounding_boxes,point,class_name,size)
       if(obj != False):
        print("picked up "+str(obj.nr)+"#"+obj.name+" from "+str(obj.distance))
@@ -835,11 +834,15 @@ def process(img):
        text_offset_x = xmin
        text_offset_y = ymin - 5
        
+       print("similar")
        _sid = find_similar_objects(features[i],class_name)
+       print(_sid)
        if(_sid != False):
+        print("select")
         obj = selectObject(_sid,point[0],point[1])
+        print(str(obj))
         if(obj != False):
-         #print("restored "+str(obj.nr)+"#"+obj.name+"#"+str(obj.desc)+" from vector store")
+         print("restored "+str(obj.nr)+"#"+obj.name+"#"+str(obj.desc)+" from vector store")
          cv2.line(img, point, (obj.px, obj.py), (0, 255, 0), 4)
          cv2.circle(img, point, 1, (0, 255, 0), 3)
          obj.see()
@@ -850,6 +853,8 @@ def process(img):
          cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
          cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
         else:
+         print("new item 1")
+
          cv2.circle(img, point, 1, (255, 255, 0), 2) 
          cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
          cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
@@ -858,6 +863,7 @@ def process(img):
          item = BoundingBox(class_name,point,size,snap,features[i])    
          bounding_boxes.append(item)
        else:
+        print("new item 2")
         cv2.circle(img, point, 1, (255, 255, 0), 2) 
         cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
         cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
@@ -876,9 +882,12 @@ def process(img):
 #       draw_dashed_rectangle(img,(xmin, ymin),(xmax, ymax),color,1,8)
     
 #       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-#       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-       
+#       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1) 
     
+    if(zoom_factor > 1.0):
+        add(c)
+        return img
+        
     for obj in bounding_boxes:
      if(obj.checkin==False and obj.detections>=3 and obj.idle>0):
       obj.ping()
@@ -923,6 +932,21 @@ bthread.start()
 sthread = threading.Thread(target=stream)
 sthread.start()
   
+def uilayer(img):
+    height, width = img.shape[:2]
+
+    new_height = height
+    new_width = width + uispace
+
+    background_color = [64, 64, 64]
+    enlarged_img = np.full((new_height, new_width, 3), background_color, dtype=np.uint8)
+
+    enlarged_img[:height, :width] = img
+    
+    cv2.putText(enlarged_img, 'Your text description here', (width+24, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, 1)
+    return enlarged_img
+
+
 while loop:
     if ((q.empty() != True) and (fskip != True)):
         img = q.get_nowait()       
@@ -988,8 +1012,12 @@ while loop:
         text_y = img.shape[0] - 8
         cv2.putText(img, clock, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
         cv2.putText(img, clock, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)       
-        cv2.imshow(str(rtsp_stream), img)         
         
+        if(drawing and draw_start_x>0 and draw_end_x>0):
+            cv2.rectangle(img, (draw_start_x, draw_start_y), (draw_end_x, draw_end_y), (0,255,0), thickness=2)
+            
+        #img = uilayer(img)
+        cv2.imshow(str(rtsp_stream), img)
     else:
         fskip = False
         time.sleep(0.001)

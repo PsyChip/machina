@@ -7,6 +7,7 @@ CCTV viewer with realtime object tagger [WIP]
 - [LLAVA](https://llava-vl.github.io)
 - [YOLO 11](https://github.com/ultralytics/ultralytics)
 - [OpenCV](https://opencv.org)
+- [FAISS](https://github.com/facebookresearch/faiss)
 
 ### How it works
 Simply it connects to a high-resolution RTSP stream in a separate thread,
@@ -33,24 +34,43 @@ Stream delays by 1-2 seconds on every 10~ minutes due to network conditions, scr
 have a frame skip mechanism on 3 seconds of detection idle.
 
 ### Prerequisites
+- Install Python 3.12.x
 - Clone the repository
 - Install [ollama](https://ollama.com/) server
 - Pull the LLAVA model by running ```ollama run llava```
-- Open ```app.py``` and set your rtmp stream address at line 18
+- Pick a [pytorch](https://pytorch.org/get-started/locally/) version that compatible with your hardware and install
 - Install the dependencies by running ```pip install -r requirements.txt```
+- Open ```app.py``` and set your rtmp stream address at line 18
 - Run the script ```py app.py```
 
-### Shortcuts
+```sh
+git clone https://github.com/PsyChip/machina
+cd machina
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+pip install -r requirements.txt
+py app.py
+```
+
+### Usage
 - S : snapshot, actual image from input stream
 - R : start/stop recording. it records what you see.
 - Q : quit app
+- left mouse: select
+- middle mouse: zoom
+- right mouse: pan
 
 ### Project direction
 This is a living project, trying to create a *complete* headless security system by
-taking advantage of modern vision, object detection models on my spare time.
+taking advantage of open source object detection models on my spare time.
 
-Feel free to contribute with code, ideas or even maybe a little bit donation
-via ko-fi or bitcoin
+### TODO
+- Additional UI Layer
+- RTS style object selection box and detailed information about selected object(s)
+- People crowd, car crash, police, ambulance, running human detection [request]
+- Webhook callbacks on new object/disappeared object/movement after long stay
+
+Feel free to contribute with code, ideas or even maybe a little bit support
+via ko-fi or bitcoin. I'll prioritize the feature requests for every $10 donation 
 
 - [https://ko-fi.com/psychip](https://ko-fi.com/psychip)
 - BTC: ```bc1qlq067vldngs37l5a4yjc4wvhyt89wv3u68dsuv```

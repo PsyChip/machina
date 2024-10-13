@@ -69,11 +69,11 @@ class VectorDatabase:
         print(f"Saved index with {self.index.ntotal} vectors")
 
     def search_similar(self, query_vector, k=5):
-        query_vector = np.array([query_vector], dtype=np.float16
+        query_vector = np.array([query_vector], dtype=np.float32
         )
         distances, indices = self.index.search(query_vector, k)
         results = []
         for i, idx in enumerate(indices[0]):
-            if idx != -1 and idx < len(self.metadata):  # Ensure index is valid
-                results.append((self.metadata[idx], distances[0][i]))
+            if idx != -1 and idx < len(self.metadata):
+                results.append((self.metadata[idx], round(float(distances[0][i]), 6)))
         return results
