@@ -8,3 +8,5 @@ recordings
 recordings/*
 snapshots
 snapshots/*
+db/*.pkl
+db/*.faiss
