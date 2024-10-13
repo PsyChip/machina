@@ -790,7 +790,6 @@ def process(img):
      point = center(xmin,ymin,xmax,ymax)
      size = _size(xmin,ymin,xmax,ymax)
      
-     print("getobject")
      obj = getObject(point,class_name);
      if(obj != False):
       obj.see()
@@ -809,7 +808,6 @@ def process(img):
       cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
       
      else:
-      print("closest")
       obj = closestEx(bounding_boxes,point,class_name,size)
       if(obj != False):
        print("picked up "+str(obj.nr)+"#"+obj.name+" from "+str(obj.distance))
@@ -834,11 +832,9 @@ def process(img):
        text_offset_x = xmin
        text_offset_y = ymin - 5
        
-       print("similar")
        _sid = find_similar_objects(features[i],class_name)
        print(_sid)
        if(_sid != False):
-        print("select")
         obj = selectObject(_sid,point[0],point[1])
         print(str(obj))
         if(obj != False):
@@ -853,8 +849,7 @@ def process(img):
          cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
          cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
         else:
-         print("new item 1")
-
+         
          cv2.circle(img, point, 1, (255, 255, 0), 2) 
          cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
          cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
@@ -863,7 +858,6 @@ def process(img):
          item = BoundingBox(class_name,point,size,snap,features[i])    
          bounding_boxes.append(item)
        else:
-        print("new item 2")
         cv2.circle(img, point, 1, (255, 255, 0), 2) 
         cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
         cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
