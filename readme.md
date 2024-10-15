@@ -34,22 +34,32 @@ Stream delays by 1-2 seconds on every 10~ minutes due to network conditions, scr
 have a frame skip mechanism on 3 seconds of detection idle.
 
 ### Prerequisites
+1. Make sure you have all Visual C++ redistributables if you're running on windows
+https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170
+
+### Installation
 - Install Python 3.12.x
 - Clone the repository
 - Install [ollama](https://ollama.com/) server
 - Pull the LLAVA model by running ```ollama run llava```
-- Pick a [pytorch](https://pytorch.org/get-started/locally/) version that compatible with your hardware and install
 - Install the dependencies by running ```pip install -r requirements.txt```
+- Remove pytorch cpu version and install the cuda version
 - Open ```app.py``` and set your rtmp stream address at line 18
 - Run the script ```py app.py```
 
 ```sh
 git clone https://github.com/PsyChip/machina
 cd machina
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install -r requirements.txt
+pip uninstall torch torchvision torchaudio
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 py app.py
 ```
+
+### Notes
+- It's okay to keep with cpu version of FAISS if you're using yolo nano, small or medium model
+- Change ```vsize``` value depending on your chosen yolo model, you need to delete the index when
+changing vector size.
 
 ### Usage
 - S : snapshot, actual image from input stream

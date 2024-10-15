@@ -765,7 +765,6 @@ def process(img):
      if(class_name=="car" and ((width>height and (width/height)>=2) or (width<min_size or height<min_size))):
       continue
      
-     """
      if(zoom_factor > 1.0):
         color = colors[class_id].tolist()
         alpha = 0.35
@@ -783,7 +782,7 @@ def process(img):
         cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
         cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         continue
-     """  
+     
      idx = class_id
      obj_score[idx] = obj_score[idx]+1 
      
@@ -866,18 +865,6 @@ def process(img):
         item = BoundingBox(class_name,point,size,snap,features[i])    
         bounding_boxes.append(item)
          
-#       color = colors[class_id].tolist()
-#       alpha = 0.35
-#       color_with_alpha = color + [alpha]
-              
-#       overlay = img[ymin:ymax+1, xmin:xmax+1].copy()
-#       cv2.rectangle(overlay, (0, 0), (xmax-xmin, ymax-ymin), color_with_alpha, thickness=-1)
-#       cv2.addWeighted(overlay, alpha, img[ymin:ymax+1, xmin:xmax+1], 1 - alpha, 0, img[ymin:ymax+1, xmin:xmax+1])
-#       draw_dashed_rectangle(img,(xmin, ymin),(xmax, ymax),color,1,8)
-    
-#       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-#       cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1) 
-    
     if(zoom_factor > 1.0):
         add(c)
         return img

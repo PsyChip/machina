@@ -1,6 +1,4 @@
 opencv-python==4.10.0.84
-torch==2.3.1+cu118
-torchvision==0.18.1+cu118
 dill>=0.3.9
 ultralytics>=8.3.1
 pickleshare>=0.7.5

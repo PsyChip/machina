@@ -10,3 +10,5 @@ snapshots
 snapshots/*
 db/*.pkl
 db/*.faiss
+__pycache__
+__pycache__/*
