@@ -26,6 +26,12 @@ ollama = "http://magdalena:11434/api/generate"
 
 vsize = 512 # yolo11n:256 yolo11s:512
 
+_font = cv2.FONT_HERSHEY_SIMPLEX
+_gray = cv2.COLOR_BGR2GRAY
+
+point_timeout = 2500
+stationary_val = 16
+
 buffer = 512
 idle_reset = 3000
 min_confidence = 0.15
@@ -188,9 +194,6 @@ app_start = timestamp()
 obj_score = labels
 
 bounding_boxes = []
-point_timeout = 2500
-stationary_val = 16
-
 obj_number = 1
 
 def save_bounding_boxes(bounding_boxes, filename="db/bounding_boxes.pkl"):
@@ -393,8 +396,8 @@ class BoundingBox:
      self.min_y = self.y - (stationary_val)
      self.max_y = self.y + (stationary_val)
            
-    def contains(self, x, y):
-        return ((self.checkin == False) and self.min_x <= x <= self.max_x) and (self.min_y <= y <= self.max_y)
+    def contains(self, x, y,time):
+        return (((self.checkin == False) and self.min_x <= x <= self.max_x) and (self.min_y <= y <= self.max_y) and (time-self.seen<point_timeout))
     
     def update(self, time, new_x, new_y):
      self.checkin = True
@@ -446,7 +449,7 @@ def closest(bounding_boxes, reference_point, class_name, size):
     return closest_bbox
 
 def blur(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(image, _gray)
     gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0)
     gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1)
     mag = np.sqrt(gx**2 + gy**2)
@@ -490,7 +493,7 @@ def closestEx(bounding_boxes, reference_point,class_name,size):
   
   point = (c.x,c.y)
   found.append(c)
-  print("iteration "+str(i))
+  #print("iteration "+str(i))
   
  return found[-1]
 
@@ -503,9 +506,10 @@ def getObject(point,cname):
         if(cname!=box.name):
          continue
 
-        if box.contains(x, y):            
+        if box.contains(x, y, time):            
          box.update(time,x,y)
-         return box 
+         bounding_boxes[i].checkin = True
+         return bounding_boxes[i]
          
         if (time-box.seen) >= point_timeout:
           box.hide()
@@ -655,8 +659,8 @@ def stream():
              cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
 def fmatch(img1, img2):
-    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+    gray1 = cv2.cvtColor(img1, _gray)
+    gray2 = cv2.cvtColor(img2, _gray)
 
     orb = cv2.ORB_create()
     kp1, des1 = orb.detectAndCompute(gray1, None)
@@ -673,7 +677,7 @@ def fmatch(img1, img2):
     h, w = gray2.shape
     aligned_img1 = cv2.warpPerspective(img1, M, (w, h))
 
-    diff = cv2.absdiff(cv2.cvtColor(aligned_img1, cv2.COLOR_BGR2GRAY), gray2)
+    diff = cv2.absdiff(cv2.cvtColor(aligned_img1, _gray), gray2)
 
     _, thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
 
@@ -694,11 +698,12 @@ def fmatch(img1, img2):
 def selectObject(sid,x,y):
     i = 0
     while i < len(bounding_boxes):
-        print(i)
+        #print(i)
         bbox = bounding_boxes[i]
-        if bbox.sid == sid:            
+        if bbox.sid == sid and bbox.checkin == False:            
          bbox.update(millis(),x,y)
-         return bbox       
+         bounding_boxes[i].checkin = True
+         return bounding_boxes[i]       
         else:
          i += 1
          
@@ -711,7 +716,7 @@ def find_similar_objects(query_vector, class_name, k=5):
     _c=25;
     
     for metadata, distance in results:
-        if(distance >= 4):
+        if(distance >= 1):
          continue;
 
         if(distance<_c):
@@ -733,7 +738,7 @@ def process(img):
     img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
 
     with torch.no_grad():
-        results = model(img_tensor, verbose=False, stream = True)
+        results = model(img_tensor, verbose=False, stream = True, iou = 0.3, imgsz = (640,480), agnostic_nms = True)
     
     obj_score = [0 for _ in range(len(obj_score))]
     c = 0;
@@ -779,8 +784,8 @@ def process(img):
         cv2.addWeighted(overlay, alpha, img[ymin:ymax+1, xmin:xmax+1], 1 - alpha, 0, img[ymin:ymax+1, xmin:xmax+1])
         draw_dashed_rectangle(img,(xmin, ymin),(xmax, ymax),color,1,8)
     
-        cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-        cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+        cv2.putText(img, text, (text_offset_x, text_offset_y), _font, 0.35, (0, 0, 0), 2)
+        cv2.putText(img, text, (text_offset_x, text_offset_y), _font, 0.35, (255, 255, 255), 1)
         continue
      
      idx = class_id
@@ -800,11 +805,11 @@ def process(img):
       color = colors[class_id].tolist()
       cv2.circle(img, point, 1, (0, 0, 255), 2)
       
-      cv2.putText(img, sid, (obj.x,obj.y - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-      cv2.putText(img, sid, (obj.x,obj.y - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+      cv2.putText(img, sid, (obj.x,obj.y - 18), _font, 0.35, (0, 0, 0), 2)
+      cv2.putText(img, sid, (obj.x,obj.y - 18), _font, 0.35, (255,255,255), 1)
       idle = str(obj.idle)+"s"
-      cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-      cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+      cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (0, 0, 0), 2)
+      cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (200, 200, 200), 1)
       
      else:
       obj = closestEx(bounding_boxes,point,class_name,size)
@@ -820,12 +825,12 @@ def process(img):
        
        cv2.circle(img, point, 1, (0, 255, 0), 2)
  
-       cv2.putText(img, sid, (obj.x,obj.y - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-       cv2.putText(img, sid, (obj.x,obj.y - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+       cv2.putText(img, sid, (obj.x,obj.y - 18), _font, 0.35, (0, 0, 0), 2)
+       cv2.putText(img, sid, (obj.x,obj.y - 18), _font, 0.35, (255,255,255), 1)
  
        idle = str(obj.idle)+"s"
-       cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-       cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)      
+       cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (0, 0, 0), 2)
+       cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (200, 200, 200), 1)      
       else:                        
        text = f"{class_name}"+" "+str(round(confidence, 6))         
        text_offset_x = xmin
@@ -842,24 +847,24 @@ def process(img):
          cv2.circle(img, point, 1, (0, 255, 0), 3)
          obj.see()
          sid = obj.desc if obj.desc != False else obj.name + "#" + str(obj.nr)
-         cv2.putText(img, sid, (obj.x,obj.y - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-         cv2.putText(img, sid, (obj.x,obj.y - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+         cv2.putText(img, sid, (obj.x,obj.y - 18), _font, 0.35, (0, 0, 0), 2)
+         cv2.putText(img, sid, (obj.x,obj.y - 18), _font, 0.35, (255,255,255), 1)
          idle = str(obj.idle)+"s"
-         cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-         cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+         cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (0, 0, 0), 2)
+         cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (200, 200, 200), 1)
         else:
          
          cv2.circle(img, point, 1, (255, 255, 0), 2) 
-         cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-         cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+         cv2.putText(img, text, (text_offset_x, text_offset_y), _font, 0.35, (0, 0, 0), 2)
+         cv2.putText(img, text, (text_offset_x, text_offset_y), _font, 0.35, (255,255,255), 1)
          qxmin,qymin,qxmax,qymax = transform(xmin,ymin,xmax,ymax,padding)
          snap = photo[qymin:qymax, qxmin:qxmax]
          item = BoundingBox(class_name,point,size,snap,features[i])    
          bounding_boxes.append(item)
        else:
         cv2.circle(img, point, 1, (255, 255, 0), 2) 
-        cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-        cv2.putText(img, text, (text_offset_x, text_offset_y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+        cv2.putText(img, text, (text_offset_x, text_offset_y), _font, 0.35, (0, 0, 0), 2)
+        cv2.putText(img, text, (text_offset_x, text_offset_y), _font, 0.35, (255,255,255), 1)
         qxmin,qymin,qxmax,qymax = transform(xmin,ymin,xmax,ymax,padding)
         snap = photo[qymin:qymax, qxmin:qxmax]
         item = BoundingBox(class_name,point,size,snap,features[i])    
@@ -870,9 +875,9 @@ def process(img):
         return img
         
     for obj in bounding_boxes:
-     if(obj.checkin==False and obj.detections>=3 and obj.idle>0):
+     if(obj.checkin==False and obj.detections>=3 and obj.idle>1):
       obj.ping()
-      if(now-obj.seen>3000):
+      if(now-obj.seen>point_timeout):
        continue
        
       if(obj.desc!=False):
@@ -882,11 +887,11 @@ def process(img):
        
       idle = str(obj.idle)+"s"
       
-      cv2.putText(img, sid, (obj.x,obj.y - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-      cv2.putText(img, sid, (obj.x,obj.y - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+      cv2.putText(img, sid, (obj.x,obj.y - 18), _font, 0.35, (0, 0, 0), 2)
+      cv2.putText(img, sid, (obj.x,obj.y - 18), _font, 0.35, (255,255,255), 1)
       cv2.circle(img, (obj.x,obj.y), 1, (0, 255, 255), 2)     
-      cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2)
-      cv2.putText(img, idle, (obj.x,obj.y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+      cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (0, 0, 0), 2)
+      cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (200, 200, 200), 1)
     add(c);
     return img
      
@@ -924,7 +929,7 @@ def uilayer(img):
 
     enlarged_img[:height, :width] = img
     
-    cv2.putText(enlarged_img, 'Your text description here', (width+24, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, 1)
+    cv2.putText(enlarged_img, 'Your text description here', (width+24, 24), _font, 0.5, (255, 255, 255), 1, 1)
     return enlarged_img
 
 
@@ -952,8 +957,8 @@ while loop:
         else:
          obj_idle = millis() - obj_break   
         
-        cv2.putText(img, "Objects: "+str(object_count), (16, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)        
-        cv2.putText(img, "Objects: "+str(object_count), (16, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        cv2.putText(img, "Objects: "+str(object_count), (16, 16), _font, 0.4, (0, 0, 0), 2)        
+        cv2.putText(img, "Objects: "+str(object_count), (16, 16), _font, 0.4, (0, 255, 0), 1)
         
         old_count = object_count;
         frames+=1
@@ -963,36 +968,36 @@ while loop:
          last_frame = millis()         
         
         _fps = "FPS: "+str(fps)
-        text_size = cv2.getTextSize(_fps, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]    
+        text_size = cv2.getTextSize(_fps, _font, 0.5, 1)[0]    
         text_x = 16
         text_y = img.shape[0] - 5
-        cv2.putText(img, _fps, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
-        cv2.putText(img, _fps, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        cv2.putText(img, _fps, (text_x, text_y), _font, 0.4, (0, 0, 0), 2)
+        cv2.putText(img, _fps, (text_x, text_y), _font, 0.4, (0, 255, 0), 1)
         
         line = 16
         _t = line*2
         for i, s in enumerate(obj_score):
          if(s>0):
           _s = labels[i]+": "+str(s)
-          cv2.putText(img, _s, (16, _t), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)        
-          cv2.putText(img, _s, (16, _t), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+          cv2.putText(img, _s, (16, _t), _font, 0.4, (0, 0, 0), 2)        
+          cv2.putText(img, _s, (16, _t), _font, 0.4, (255, 255, 255), 1)
           _t = _t+line   
         
         if recording:
             out.write(img)
-            cv2.putText(img, "REC", (16, img.shape[0] - 38), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            cv2.putText(img, "REC", (16, img.shape[0] - 38), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            cv2.putText(img, "REC", (16, img.shape[0] - 38), _font, 0.5, (0, 0, 0), 2)
+            cv2.putText(img, "REC", (16, img.shape[0] - 38), _font, 0.5, (0, 0, 255), 1)
         
         bb = str(len(bounding_boxes))
-        cv2.putText(img, "Tracking: "+bb, (16, img.shape[0] - 26), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)        
-        cv2.putText(img, "Tracking: "+bb, (16, img.shape[0] - 26), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (64, 255, 255), 1)
+        cv2.putText(img, "Tracking: "+bb, (16, img.shape[0] - 26), _font, 0.4, (0, 0, 0), 2)        
+        cv2.putText(img, "Tracking: "+bb, (16, img.shape[0] - 26), _font, 0.4, (64, 255, 255), 1)
         
         clock = datetime.now().strftime("%H:%M:%S")       
-        text_size = cv2.getTextSize(clock, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+        text_size = cv2.getTextSize(clock, _font, 0.5, 1)[0]
         text_x = img.shape[1] - text_size[0] - 10
         text_y = img.shape[0] - 8
-        cv2.putText(img, clock, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
-        cv2.putText(img, clock, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)       
+        cv2.putText(img, clock, (text_x, text_y), _font, 0.4, (0, 0, 0), 2)
+        cv2.putText(img, clock, (text_x, text_y), _font, 0.4, (255, 255, 255), 1)       
         
         if(drawing and draw_start_x>0 and draw_end_x>0):
             cv2.rectangle(img, (draw_start_x, draw_start_y), (draw_end_x, draw_end_y), (0,255,0), thickness=2)
@@ -1014,4 +1019,4 @@ save_bounding_boxes(bounding_boxes)
 
 print("closing cv window..") 
 cv2.destroyAllWindows()
-print("terminating..") 
+print("terminating..")
