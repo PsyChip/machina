@@ -34,7 +34,7 @@ Stream delays by 1-2 seconds on every 10~ minutes due to network conditions, scr
 have a frame skip mechanism on 3 seconds of detection idle.
 
 ### Prerequisites
-1. Make sure you have all Visual C++ redistributables if you're running on windows
+Make sure you have all Visual C++ redistributables if you're running on windows
 https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170
 
 ### Installation
@@ -57,9 +57,12 @@ py app.py
 ```
 
 ### Notes
-- It's okay to keep with cpu version of FAISS if you're using yolo nano, small or medium model
+- It's okay to stick with cpu version of FAISS if you're using yolo nano/small/medium model
 - Change ```vsize``` value depending on your chosen yolo model, you need to delete the index when
 changing vector size.
+- CUDA enabled torch is an absolute necessity for real time interference
+- Pretrained models of yolo is not so accurate on low-res streams, it's highly recommended to train
+your own model by using object images from your ```/elements``` folder
 
 ### Usage
 - S : snapshot, actual image from input stream
