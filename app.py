@@ -14,17 +14,15 @@ import base64
 import requests
 import json
 import pickle
+import sys
 
 import torch.nn as nn
-from vdb import VectorDatabase
+#from vdb import VectorDatabase
 
 model = "yolo11s"
 rtsp_stream = "rtsp://psychip:neuromancer1@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
 ollama = "http://magdalena:11434/api/generate"
-
-#rtsp_stream = "VID_20231227_172247.mp4"
-
-vsize = 512 # yolo11n:256 yolo11s:512
+#vsize = 512 # yolo11n:256 yolo11s:512
 
 _font = cv2.FONT_HERSHEY_SIMPLEX
 _gray = cv2.COLOR_BGR2GRAY
@@ -37,18 +35,22 @@ idle_reset = 3000
 min_confidence = 0.15
 min_size = 20
 class_confidence = {
-"truck":0.25,
+"truck":0.35,
 "car":0.15,
 "boat":0.85,
 "bus":0.5,
 "aeroplane":0.85,
-"frisbee":0.88,
+"frisbee":0.85,
 "pottedplant":0.55,
 "train":0.85,
 "chair":0.5,
 "parking meter":0.9,
 "fire hydrant":0.65,
-"traffic light":0.65
+"traffic light":0.65,
+"backpack":0.65,
+"bicycle":0.55,
+"bench":0.75,
+"zebra":0.90
 }
 
 prompts = {
@@ -73,6 +75,8 @@ streamsize = (0,0)
 zoom_factor = 1.0
 pan_x = 0
 pan_y = 0
+
+hdstream = False
 drawing = False
 dragging = False
 drag_start_x = 0
@@ -156,7 +160,7 @@ def resample(frame):
     
     zoomed_frame = frame[start_y:start_y+zoomed_height, start_x:start_x+zoomed_width]
     
-    return cv2.resize(zoomed_frame, opsize, interpolation=cv2.INTER_AREA)
+    return cv2.resize(zoomed_frame, opsize, interpolation=cv2.INTER_LINEAR_EXACT)
     
 def rest(url, payload):
     headers = {'Content-Type':'application/json'}
@@ -300,7 +304,11 @@ def mouse_callback(event, x, y, flags, param):
         draw_start_x = x
         draw_start_y = y
     
-    if event == cv2.EVENT_MOUSEWHEEL: 
+    if event == cv2.EVENT_MOUSEWHEEL:
+        if(zoom_factor == 1.0):
+            pan_x = 0
+            pan_y = 0
+        
         if flags > 0:
             zoom_factor = min(6.0, zoom_factor * 1.1)
         else:
@@ -323,7 +331,7 @@ def mouse_callback(event, x, y, flags, param):
             
         
 class BoundingBox:
-    def __init__(self, name, points, size, image,features):
+    def __init__(self, name, points, size, image):
         global obj_number
         self.nr = obj_number
         obj_number +=1
@@ -343,17 +351,18 @@ class BoundingBox:
         self.desc = False
         self.state = 0
         self.seen = self.created
-        self.features = features
+        self.features = None
         self.visible = True
         
         self.init()
         print("New object: "+self.name+"#"+str(self.nr)+" size:"+str(self.size))
         self.save("elements/"+self.name+"-"+str(self.nr)+".png")
         
+        """
         vector_db.add_vector(self.features, {
                 'class': self.name,
                 'sid': self.sid
-            })
+            })"""
         
     def hide(self):
         self.visible = False
@@ -455,6 +464,18 @@ def blur(image):
     mag = np.sqrt(gx**2 + gy**2)
     return np.mean(mag)
     
+def find_closest_point(points, point):
+    closest_point = None
+    min_distance = float('inf')
+    
+    for x, y in points:
+        distance = math.sqrt((x - point[0])**2 + (y - point[1])**2)
+        if distance < min_distance:
+            min_distance = distance
+            closest_point = (x, y)
+    
+    return closest_point, min_distance
+    
 def findSimilar(ref):
     closest_bbox = False
     score = 0.85
@@ -512,7 +533,10 @@ def getObject(point,cname):
          return bounding_boxes[i]
          
         if (time-box.seen) >= point_timeout:
-          box.hide()
+         del bounding_boxes[i]
+            
+        #if (time-box.seen) >= point_timeout:
+        #  box.hide()
 
     return False
 
@@ -613,11 +637,12 @@ model = YOLO("models/"+model+".pt")
 print(f"Loading model to {device}")
 model.to(device)
 
-print("initializing vector store")
-vector_db = VectorDatabase(vector_dimension=vsize)
+#print("initializing vector store")
+#vector_db = VectorDatabase(vector_dimension=vsize)
 
 print("loading objects")
-bounding_boxes = load_bounding_boxes()
+#bounding_boxes = load_bounding_boxes()
+bounding_boxes = []
 
 loop = True
 cap = cv2.VideoCapture(rtsp_stream)
@@ -631,6 +656,12 @@ ret, img = cap.read()
 
 window = str(rtsp_stream)
 streamsize = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+if(streamsize[0]>opsize[0] or streamsize[1]>opsize[1]):
+    hdstream = True
+    print("HD stream mode enabled")
+else:
+    print("Stream resolution matches to window size")
 
 cv2.namedWindow(window, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(window, opsize[0]+uispace, opsize[1])
@@ -650,13 +681,13 @@ def stream():
                  last_fskip = timestamp()
                  q.queue.clear()
                  obj_idle = 0
-                 fskip = True
                  print(f"Frame skip")
                 else:
                  q.put(frame)
             else:
-             print("Can't receive frame (stream end?). Restarting video...")
-             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+             print("Can't receive frame, restarting video...")
+             cap.release()
+             cap = cv2.VideoCapture(rtsp_stream)
 
 def fmatch(img1, img2):
     gray1 = cv2.cvtColor(img1, _gray)
@@ -729,20 +760,21 @@ def find_similar_objects(query_vector, class_name, k=5):
     return _sid
  
         
-def process(img):
-    photo = img.copy()
-    img = resample(img)
+def process(photo):
+    if hdstream==True:
+        img = resample(photo)
+     
     global obj_score, bounding_boxes
     
     img_tensor = torch.from_numpy(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).to(device).float() / 255.0
     img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
 
     with torch.no_grad():
-        results = model(img_tensor, verbose=False, stream = True, iou = 0.3, imgsz = (640,480), agnostic_nms = True)
+        results = model(img_tensor, verbose=False, iou = 0.45, agnostic_nms = True, half=False, max_det = 16, conf = min_confidence)
     
     obj_score = [0 for _ in range(len(obj_score))]
     c = 0;
-    
+    points = []
     boxes = [box for r in results for box in r.boxes]    
     features = extract_features(img_tensor, model, boxes)
     now = millis()
@@ -793,15 +825,19 @@ def process(img):
      
      point = center(xmin,ymin,xmax,ymax)
      size = _size(xmin,ymin,xmax,ymax)
-     
+     closest, distance = find_closest_point(points, point)      
      obj = getObject(point,class_name);
      if(obj != False):
+      if(distance<6.0):
+        continue;
+        
+      points.append(point)      
       obj.see()
       if(obj.desc!=False):
        sid = obj.desc
       else:
        sid = obj.name+"#"+str(obj.nr)
-        
+
       color = colors[class_id].tolist()
       cv2.circle(img, point, 1, (0, 0, 255), 2)
       
@@ -831,13 +867,15 @@ def process(img):
        idle = str(obj.idle)+"s"
        cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (0, 0, 0), 2)
        cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (200, 200, 200), 1)      
-      else:                        
+      else:
+       if(distance<6.0):
+        continue;          
        text = f"{class_name}"+" "+str(round(confidence, 6))         
        text_offset_x = xmin
        text_offset_y = ymin - 5
        
-       _sid = find_similar_objects(features[i],class_name)
-       print(_sid)
+       #_sid = find_similar_objects(features[i],class_name)
+       _sid = False
        if(_sid != False):
         obj = selectObject(_sid,point[0],point[1])
         print(str(obj))
@@ -853,7 +891,8 @@ def process(img):
          cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (0, 0, 0), 2)
          cv2.putText(img, idle, (obj.x,obj.y - 6), _font, 0.35, (200, 200, 200), 1)
         else:
-         
+         if(distance<6.0):
+          continue;
          cv2.circle(img, point, 1, (255, 255, 0), 2) 
          cv2.putText(img, text, (text_offset_x, text_offset_y), _font, 0.35, (0, 0, 0), 2)
          cv2.putText(img, text, (text_offset_x, text_offset_y), _font, 0.35, (255,255,255), 1)
@@ -862,12 +901,14 @@ def process(img):
          item = BoundingBox(class_name,point,size,snap,features[i])    
          bounding_boxes.append(item)
        else:
+        if(distance<6.0):
+         continue;
         cv2.circle(img, point, 1, (255, 255, 0), 2) 
         cv2.putText(img, text, (text_offset_x, text_offset_y), _font, 0.35, (0, 0, 0), 2)
         cv2.putText(img, text, (text_offset_x, text_offset_y), _font, 0.35, (255,255,255), 1)
         qxmin,qymin,qxmax,qymax = transform(xmin,ymin,xmax,ymax,padding)
         snap = photo[qymin:qymax, qxmin:qxmax]
-        item = BoundingBox(class_name,point,size,snap,features[i])    
+        item = BoundingBox(class_name,point,size,snap)    
         bounding_boxes.append(item)
          
     if(zoom_factor > 1.0):
@@ -875,7 +916,11 @@ def process(img):
         return img
         
     for obj in bounding_boxes:
-     if(obj.checkin==False and obj.detections>=3 and obj.idle>1):
+     if(obj.checkin==False and obj.detections>=3 and obj.idle>1 and obj.idle < 8):
+      closest, distance = find_closest_point(points, (obj.x,obj.y))     
+      if(distance<6.0):
+         continue;
+         
       obj.ping()
       if(now-obj.seen>point_timeout):
        continue
@@ -938,6 +983,10 @@ while loop:
         img = q.get_nowait()       
         
         key = cv2.waitKey(1) & 0xFF
+        if key == 32:
+            print("frame skip")
+            q.queue.clear()
+            
         if key == ord('q'):
             loop = False
         elif key == ord('r'):
@@ -948,6 +997,7 @@ while loop:
         elif key == ord('s'):
             take_snapshot(img)
         
+        start = time.perf_counter_ns()
         img = process(img)
         
         object_count = average()
@@ -962,18 +1012,21 @@ while loop:
         
         old_count = object_count;
         frames+=1
-        if(millis()-last_frame>=250):
-         fps = (frames-prev_frames)*4 
+        if(millis()-last_frame>=1000):
+         fps = (frames-prev_frames)*1 
          prev_frames = frames
          last_frame = millis()         
         
-        _fps = "FPS: "+str(fps)
+        duration = time.perf_counter_ns() - start
+        
+        _fps = "FPS: "+str(fps)+" - LAG: "+str(duration // 1000000)+"ms"
         text_size = cv2.getTextSize(_fps, _font, 0.5, 1)[0]    
         text_x = 16
         text_y = img.shape[0] - 5
         cv2.putText(img, _fps, (text_x, text_y), _font, 0.4, (0, 0, 0), 2)
         cv2.putText(img, _fps, (text_x, text_y), _font, 0.4, (0, 255, 0), 1)
         
+        """
         line = 16
         _t = line*2
         for i, s in enumerate(obj_score):
@@ -982,7 +1035,7 @@ while loop:
           cv2.putText(img, _s, (16, _t), _font, 0.4, (0, 0, 0), 2)        
           cv2.putText(img, _s, (16, _t), _font, 0.4, (255, 255, 255), 1)
           _t = _t+line   
-        
+        """
         if recording:
             out.write(img)
             cv2.putText(img, "REC", (16, img.shape[0] - 38), _font, 0.5, (0, 0, 0), 2)
@@ -1008,15 +1061,15 @@ while loop:
         fskip = False
         time.sleep(0.001)
 
-print("saving vector index..")
-vector_db.save_index()
+#print("saving vector index..")
+#vector_db.save_index()
 
-print("saving found objects..")
-save_bounding_boxes(bounding_boxes)
-
-#bthread.join()
-#sthread.join()
-
+#print("saving found objects..")
+#save_bounding_boxes(bounding_boxes)
 print("closing cv window..") 
 cv2.destroyAllWindows()
 print("terminating..")
+loop = False
+#bthread.join()
+#sthread.join()
+sys.exit(0)
