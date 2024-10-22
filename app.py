@@ -50,8 +50,12 @@ class_confidence = {
 "backpack":0.65,
 "bicycle":0.55,
 "bench":0.75,
-"zebra":0.90
+"zebra":0.90,
+"tvmonitor":0.80
 }
+
+# change per scenerio, outdoor, indoor, jungle, mountain etc
+classlist = ["person","car","motorbike","bicycle","truck","traffic light","stop sign","bench","bird","cat","dog","backpack","suitcase","handbag","umbrella","sports ball"]
 
 prompts = {
 "person": "get gender and age of this person in 5 words or less",
@@ -185,6 +189,8 @@ def timestamp():
  return int(time.time())
 
 labels = open(resolve("db/coco.names")).read().strip().split("\n")
+classlist = [labels.index(x) for x in classlist]
+
 object_count = 0
 old_count = 0
 obj_break = millis()
@@ -770,7 +776,7 @@ def process(photo):
     img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
 
     with torch.no_grad():
-        results = model(img_tensor, verbose=False, iou = 0.45, agnostic_nms = True, half=False, max_det = 16, conf = min_confidence)
+        results = model(img_tensor, verbose=False, iou = 0.45, agnostic_nms = True, half=False, max_det = 16, conf = min_confidence, classes = classlist)
     
     obj_score = [0 for _ in range(len(obj_score))]
     c = 0;
