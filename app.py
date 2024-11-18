@@ -22,7 +22,10 @@ import torch.nn as nn
 model = "yolo11s"
 rtsp_stream = "rtsp://psychip:neuromancer1@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
 ollama = "http://magdalena:11434/api/generate"
+ollama_model = "llava:latest";
+
 #vsize = 512 # yolo11n:256 yolo11s:512
+
 
 _font = cv2.FONT_HERSHEY_SIMPLEX
 _gray = cv2.COLOR_BGR2GRAY
@@ -952,7 +955,7 @@ def postreview():
         for box in bounding_boxes:
             if (box.state == 0) and (box.image is not None):
                 res = rest(ollama, {
-                    "model": "llava",
+                    "model": ollama_model,
                     "prompt": genprompt(box.name),
                     "images": [box.export()],
                     "stream": False
