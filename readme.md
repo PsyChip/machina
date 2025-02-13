@@ -8,6 +8,16 @@ CCTV viewer with realtime object tagger [WIP]
 - [YOLO 11](https://github.com/ultralytics/ultralytics)
 - [OpenCV](https://opencv.org)
 - [FAISS](https://github.com/facebookresearch/faiss)
+- [BLIP](https://github.com/salesforce/BLIP)
+- [CLIP](https://huggingface.co/openai/clip-vit-large-patch14)
+
+### V2 update
+Now it's able to generate realtime scene captions by using CLIP+BLIP together,
+BLIP generates captions from a cctv stream on each 30 frames, CLIP matches
+the pre-generated text on every 10 frames.
+
+Tested on RTX 3060, got 600ms avg for captioning and 47ms for caption matching
+-----------------
 
 ### How it works
 Simply it connects to a high-resolution RTSP stream in a separate thread,
@@ -66,6 +76,7 @@ your own model by using object images from your ```/elements``` folder
 
 ### Usage
 - S : snapshot, actual image from input stream
+- C : caption scene, save to folder along with snapshot
 - R : start/stop recording. it records what you see.
 - Q : quit app
 - left mouse: select

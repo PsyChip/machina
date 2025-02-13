@@ -144,6 +144,7 @@ print("Generating text features of " + str(len(events)))
 text_inputs = clip.tokenize(events).to(cdevice)
 text_features = cmodel.encode_text(text_inputs)
 
+
 def match_caption(image):
     mstart = millis()
     image = preprocess(Image.fromarray(image)).unsqueeze(0).to(device)
@@ -159,6 +160,7 @@ def match_caption(image):
     print(f"Matched caption in {mend}ms")
 
     return (events[best_caption_idx], similarity_score)
+
 
 def resolve(file_path):
     if os.path.isabs(file_path):
@@ -199,6 +201,7 @@ def extract_features(img_tensor, model, boxes):
 
     return features
 
+
 def preinit():
     for folder in ["elements", "models", "recordings", "snapshots"]:
         if not os.path.exists(folder):
@@ -215,6 +218,7 @@ def transform(xmin, ymin, xmax, ymax, pad):
     new_xmax = int(xmax * x_scale) + pad
     new_ymax = int(ymax * y_scale) + pad
     return (new_xmin, new_ymin, new_xmax, new_ymax)
+
 
 def resample(frame):
     global zoom_factor, pan_x, pan_y, streamsize, opsize
@@ -251,11 +255,14 @@ def rest(url, payload):
     finally:
         return r
 
+
 def millis():
     return round(time.perf_counter() * 1000)
 
+
 def timestamp():
     return int(time.time())
+
 
 labels = open(resolve("db/coco.names")).read().strip().split("\n")
 classlist = [labels.index(x) for x in classlist]
@@ -275,6 +282,7 @@ obj_score = labels
 bounding_boxes = []
 obj_number = 1
 
+
 def save_bounding_boxes(bounding_boxes, filename="db/bounding_boxes.pkl"):
     with open(resolve(filename), "wb") as f:
         pickle.dump(bounding_boxes, f)
@@ -292,6 +300,7 @@ def load_bounding_boxes(filename="db/bounding_boxes.pkl"):
         print(f"No saved bounding boxes found at {filename}")
         return []
 
+
 def crc32(string):
     crc = 0xFFFFFFFF
     for char in string:
@@ -303,6 +312,7 @@ def crc32(string):
                 crc >>= 1
             byte >>= 1
     return crc ^ 0xFFFFFFFF
+
 
 def genprompt(t):
     if t in prompts:
@@ -322,6 +332,7 @@ def distance(x1, y1, x2, y2):
 
 def _size(x1, y1, x2, y2):
     return abs(x1 - y2)
+
 
 def bearing(x1, y1, x2, y2):
     delta_x = x2 - x1
@@ -615,6 +626,7 @@ def closestEx(bounding_boxes, reference_point, class_name, size):
 
     return found[-1]
 
+
 def getObject(point, cname):
     global bounding_boxes
     x, y = point
@@ -894,6 +906,7 @@ def find_similar_objects(query_vector, class_name, k=5):
         # print("---")
     return _sid
 """
+
 
 def process(photo):
     if hdstream == True:
@@ -1278,7 +1291,7 @@ def generate_caption(img):
     return bprocessor.decode(output[0], skip_special_tokens=True)
 
 
-def take_caption(img):    
+def take_caption(img):
     tstart = millis()
     caption = generate_caption(img)
     tend = millis() - tstart

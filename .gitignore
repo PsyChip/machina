@@ -8,6 +8,8 @@ recordings
 recordings/*
 snapshots
 snapshots/*
+models
+models/*
 captions
 captions/*
 db/*.pkl
