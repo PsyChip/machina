@@ -8,6 +8,8 @@ recordings
 recordings/*
 snapshots
 snapshots/*
+captions
+captions/*
 db/*.pkl
 db/*.faiss
 __pycache__
