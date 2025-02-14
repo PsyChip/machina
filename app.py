@@ -15,7 +15,7 @@ import requests
 import json
 import pickle
 import sys
-
+import json
 import clip
 import torch.nn as nn
 from PIL import Image
@@ -27,6 +27,8 @@ model = "yolo11m"
 rtsp_stream = (
     "rtsp://psychip:neuromancer1@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
 )
+# rtsp_stream = "rtsp://192.168.1.5:8080/h264.sdp"
+
 ollama = "http://127.0.0.1:11434/api/generate"
 ollama_model = "llava:latest"
 
@@ -34,9 +36,6 @@ ollama_model = "llava:latest"
 
 _font = cv2.FONT_HERSHEY_SIMPLEX
 _gray = cv2.COLOR_BGR2GRAY
-
-cf = 0
-cl = 0
 
 point_timeout = 2500
 stationary_val = 16
@@ -95,6 +94,9 @@ if os.path.exists("db/events.pkl"):
     with open("db/events.pkl", "rb") as file:
         events = pickle.load(file)
 
+with open("events.json", "w") as f:
+    json.dump(events, f, indent=2)
+
 snapshot_directory = "snapshots"
 
 frames = 0
@@ -140,6 +142,45 @@ bmodel = BlipForConditionalGeneration.from_pretrained(
 ).to(cdevice)
 
 print("Generating text features of " + str(len(events)))
+filtered_phrases = [
+    "there is",
+    "there are",
+    "they are",
+    "this is",
+    "these are",
+    "we can see",
+    "i see",
+    "appears to be",
+    "seems to be",
+    "looking at",
+    "showing",
+    "consisting of",
+    "made up of",
+    "in this image",
+    "in this picture",
+    "the image shows",
+    "the picture shows",
+    "what appears",
+    "what seems",
+    "can be seen",
+    "visible in",
+    "a photo of",
+    "a picture of",
+    "it is",
+    "that is",
+    "aerial view of",
+    "this is an image",
+    "overhead view of",
+    "flock of",
+    "rows of",
+    "row of",
+]
+
+ignore = []
+for phrase in filtered_phrases:
+    tokens = bprocessor.tokenizer(phrase, add_special_tokens=False)
+    if tokens.input_ids:
+        ignore.append([tokens.input_ids[0]])
 
 text_inputs = clip.tokenize(events).to(cdevice)
 text_features = cmodel.encode_text(text_inputs)
@@ -1220,34 +1261,6 @@ def process(photo):
     return img
 
 
-def postreview():
-    global bounding_boxes, loop
-    while loop:
-        for box in bounding_boxes:
-            if (box.state == 0) and (box.image is not None):
-                res = rest(
-                    ollama,
-                    {
-                        "model": ollama_model,
-                        "prompt": genprompt(box.name),
-                        "images": [box.export()],
-                        "stream": False,
-                    },
-                )
-
-                if res != False:
-                    box.desc = res["response"].strip()
-                    box.state = 1
-        time.sleep(0.1)
-
-
-bthread = threading.Thread(target=postreview)
-bthread.start()
-
-sthread = threading.Thread(target=stream)
-sthread.start()
-
-
 def uilayer(img):
     height, width = img.shape[:2]
 
@@ -1277,16 +1290,11 @@ def generate_caption(img):
         img,
         return_tensors="pt",
     ).to(device)
+
     with torch.no_grad():
         output = bmodel.generate(
             **inputs,
-            max_length=50,  # Lower: 10 (short captions, might miss details) | Higher: 60 (longer captions, might add unnecessary info)
-            min_length=15,  # Lower: 1 (may generate incomplete captions) | Higher: 10 (forces longer captions, even when unnecessary)
-            num_beams=5,  # Lower: 1 (more random, less structured) | Higher: 10 (more accurate but repetitive)
-            do_sample=True,  # False (more deterministic captions) | True (allows more diversity)
-            top_k=50,  # Lower: 5 (more predictable, limited variation) | Higher: 100 (more diverse, may generate unrelated words)
-            top_p=0.8,  # Lower: 0.5 (more strict, reduces diversity) | Higher: 1.0 (more diverse but might add irrelevant details)
-            temperature=0.8,  # Lower: 0.1 (more deterministic, repetitive) | Higher: 1.0 (more creative but less reliable)
+            bad_words_ids=ignore,
         )
     return bprocessor.decode(output[0], skip_special_tokens=True)
 
@@ -1303,17 +1311,72 @@ def take_caption(img):
 
     events.append(caption)
     print("New Event >> " + caption)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{timestamp}.jpg"
-    filepath = os.path.join("captions", filename)
-    cv2.imwrite(filepath, img)
-    filename = filename + ".txt"
-    filepath = os.path.join("captions", filename)
-    with open(filepath, "w") as file:
-        file.write(caption)
 
+
+mbuf = None
+cbuf = None
+cf = 0
+cl = 0
+
+ct = 0
+lt = 0
+
+mt = 0
+ml = 0
+
+
+def captioner():
+    global loop, mbuf, cbuf, ct, lt, mt, ml, last_event
+    time.sleep(3)
+    while loop:
+        if ct == 0 or mt == 0:
+            time.sleep(0.01)
+            continue
+
+        if ct > lt:
+            lt = ct
+            caption, score = match_caption(cbuf)
+            if caption != last_event:
+                print("match: " + caption)
+                print("score: " + str(score))
+                last_event = caption
+
+        if mt > ml:
+            ml = mt
+            take_caption(mbuf)
+        time.sleep(0.01)
+
+
+def postreview():
+    global bounding_boxes, loop
+    time.sleep(3)
+    while loop:
+        for box in bounding_boxes:
+            if (box.state == 0) and (box.image is not None):
+                res = rest(
+                    ollama,
+                    {
+                        "model": ollama_model,
+                        "prompt": genprompt(box.name),
+                        "images": [box.export()],
+                        "stream": False,
+                    },
+                )
+                if res != False:
+                    box.desc = res["response"].strip()
+                    box.state = 1
+        time.sleep(0.1)
+
+
+cthread = threading.Thread(target=captioner)
+bthread = threading.Thread(target=postreview)
+sthread = threading.Thread(target=stream)
 
 print(f"Starting..")
+
+cthread.start()
+bthread.start()
+sthread.start()
 
 while loop:
     if (q.empty() != True) and (fskip != True):
@@ -1347,19 +1410,14 @@ while loop:
         cf += 1
         if cf >= 10:
             cf = 0
-            caption, score = match_caption(img)
-            if caption != last_event:
-                print("match: " + caption)
-                print("score: " + str(score))
-                last_event = caption
-                q.queue.clear()
+            cbuf = img
+            ct = millis()
 
-        # learning mode, turn off after few weeks
         cl += 1
         if cl >= 30:
             cl = 0
-            take_caption(img)
-            q.queue.clear()
+            mbuf = img
+            mt = millis()
 
         img = process(img)
 
@@ -1438,7 +1496,7 @@ while loop:
         cv2.imshow(str(rtsp_stream), img)
     else:
         fskip = False
-        time.sleep(0.001)
+        time.sleep(0.01)
 
 print("saving events list..")
 with open("db/events.pkl", "wb") as file:
