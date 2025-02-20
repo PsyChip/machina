@@ -15,15 +15,15 @@ import requests
 import json
 import pickle
 import sys
-import json
 import clip
 import torch.nn as nn
 from PIL import Image
 from transformers import BlipProcessor, BlipForConditionalGeneration
+from sklearn.cluster import DBSCAN
 
 # from vdb import VectorDatabase
 
-model = "yolo11m"
+model = "yolo12m"
 rtsp_stream = (
     "rtsp://psychip:neuromancer1@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
 )
@@ -87,7 +87,6 @@ prompts = {
     "car": "get body type and color of this car in 5 words or less",
 }
 
-last_event = ""
 events = ["cars parked on the side of a road at night"]
 
 if os.path.exists("db/events.pkl"):
@@ -129,12 +128,12 @@ draw_end_y = 0
 
 uispace = 0  # 300
 padding = 6  # px padding on each element
-
+"""
 print("Loading ViT..")
 cdevice = "cuda" if torch.cuda.is_available() else "cpu"
 cmodel, preprocess = clip.load("ViT-B/32", cdevice)
 last_event = ""
-
+last_caption = ""
 print("Loading BLIP..")
 bprocessor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
 bmodel = BlipForConditionalGeneration.from_pretrained(
@@ -184,6 +183,8 @@ for phrase in filtered_phrases:
 
 text_inputs = clip.tokenize(events).to(cdevice)
 text_features = cmodel.encode_text(text_inputs)
+text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
+"""
 
 
 def match_caption(image):
@@ -198,7 +199,7 @@ def match_caption(image):
     similarity_score = similarity.max().item()
     best_caption_idx = similarity.argmax().item()
     mend = millis() - mstart
-    print(f"Matched caption in {mend}ms")
+    # print(f"Matched caption in {mend}ms")
 
     return (events[best_caption_idx], similarity_score)
 
@@ -838,8 +839,39 @@ cv2.namedWindow(window, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(window, opsize[0] + uispace, opsize[1])
 cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)
 cv2.setMouseCallback(window, mouse_callback)
-
 q = queue.Queue(maxsize=buffer)
+
+
+def get_clusters(detected_points, eps=30, min_samples=2):
+    if not isinstance(detected_points, np.ndarray) or detected_points.size == 0:
+        return {}  # Ensure detected_points is a valid NumPy array
+
+    db = DBSCAN(eps=eps, min_samples=min_samples).fit(detected_points)
+    labels = db.labels_
+
+    clusters = {}
+    for label in set(labels):
+        if label == -1:
+            continue  # Skip noise points
+        cluster_points = detected_points[labels == label]
+
+        if cluster_points.size == 0:
+            continue  # Ensure cluster_points is not empty
+
+        min_x, min_y = np.min(cluster_points, axis=0)
+        max_x, max_y = np.max(cluster_points, axis=0)
+        count = len(cluster_points)
+        clusters[label] = (min_x, min_y, max_x, max_y, count)
+
+    return clusters  # Always return the dictionary
+
+
+def is_point_in_cluster(x, y, clusters):
+    """Checks if (x, y) is inside any cluster bounding box."""
+    for cluster_id, (min_x, min_y, max_x, max_y, count) in clusters.items():
+        if min_x <= x <= max_x and min_y <= y <= max_y:
+            return True
+    return False
 
 
 def stream():
@@ -949,6 +981,13 @@ def find_similar_objects(query_vector, class_name, k=5):
 """
 
 
+def is_point_inside(x, y, list):
+    for item in list:
+        if item[0] <= x <= item[2] and item[1] <= y <= item[3]:
+            return True
+    return False
+
+
 def process(photo):
     if hdstream == True:
         img = resample(photo)
@@ -980,6 +1019,8 @@ def process(photo):
     features = extract_features(img_tensor, model, boxes)
     now = millis()
     resetIteration()
+
+    rawcrowd = []
 
     for i, box in enumerate(boxes):
         class_id = int(box.cls)
@@ -1060,6 +1101,9 @@ def process(photo):
         obj_score[idx] = obj_score[idx] + 1
 
         point = center(xmin, ymin, xmax, ymax)
+        if class_name == "person":
+            rawcrowd.append(point)
+
         size = _size(xmin, ymin, xmax, ymax)
         closest, distance = find_closest_point(points, point)
         obj = getObject(point, class_name)
@@ -1075,10 +1119,11 @@ def process(photo):
                 sid = obj.name + "#" + str(obj.nr)
 
             color = colors[class_id].tolist()
-            cv2.circle(img, point, 1, (0, 0, 255), 2)
 
+            cv2.circle(img, point, 1, (0, 0, 255), 2)
             cv2.putText(img, sid, (obj.x, obj.y - 18), _font, 0.35, (0, 0, 0), 2)
             cv2.putText(img, sid, (obj.x, obj.y - 18), _font, 0.35, (255, 255, 255), 1)
+
             idle = str(obj.idle) + "s"
             cv2.putText(img, idle, (obj.x, obj.y - 6), _font, 0.35, (0, 0, 0), 2)
             cv2.putText(img, idle, (obj.x, obj.y - 6), _font, 0.35, (200, 200, 200), 1)
@@ -1230,7 +1275,21 @@ def process(photo):
         add(c)
         return img
 
+    cenable = False
+    crowds = get_clusters(np.array(rawcrowd), 50, 2)
+    rect = []
+    if len(crowds) > 0:
+        cenable = True
+        for crowd in crowds:
+            min_x, min_y, max_x, max_y, count = crowds[crowd]
+            rect.append((min_x, min_y, max_x, max_y, count))
+            cv2.rectangle(img, (min_x, min_y), (max_x, max_y), (0, 255, 0), 1)
+            cid = str(count) + " people"
+            cv2.putText(img, cid, (min_x, min_y - 18), _font, 0.35, (0, 0, 0), 2)
+            cv2.putText(img, cid, (min_x, min_y - 18), _font, 0.35, (255, 255, 255), 1)
+
     for obj in bounding_boxes:
+
         if (
             obj.checkin == False
             and obj.detections >= 3
@@ -1243,6 +1302,9 @@ def process(photo):
 
             obj.ping()
             if now - obj.seen > point_timeout:
+                continue
+
+            if cenable == True and is_point_inside(obj.x, obj.y, rect) == True:
                 continue
 
             if obj.desc != False:
@@ -1300,10 +1362,15 @@ def generate_caption(img):
 
 
 def take_caption(img):
+    global last_caption
     tstart = millis()
     caption = generate_caption(img)
     tend = millis() - tstart
     print(f"Caption generated in {tend}ms")
+
+    if caption == last_caption:
+        return
+    last_caption = caption
 
     if caption in events:
         print("-- " + caption)
@@ -1344,7 +1411,7 @@ def captioner():
         if mt > ml:
             ml = mt
             take_caption(mbuf)
-        time.sleep(0.01)
+        time.sleep(0.1)
 
 
 def postreview():
@@ -1374,8 +1441,8 @@ sthread = threading.Thread(target=stream)
 
 print(f"Starting..")
 
-cthread.start()
-bthread.start()
+# cthread.start()
+# bthread.start()
 sthread.start()
 
 while loop:
@@ -1408,13 +1475,13 @@ while loop:
         start = time.perf_counter_ns()
 
         cf += 1
-        if cf >= 10:
+        if cf >= 120:
             cf = 0
             cbuf = img
             ct = millis()
 
         cl += 1
-        if cl >= 30:
+        if cl >= 240:
             cl = 0
             mbuf = img
             mt = millis()
@@ -1428,8 +1495,8 @@ while loop:
         else:
             obj_idle = millis() - obj_break
 
-        cv2.putText(img, last_event, (16, 16), _font, 0.4, (0, 0, 0), 2)
-        cv2.putText(img, last_event, (16, 16), _font, 0.4, (255, 255, 255), 1)
+        # cv2.putText(img, last_event, (16, 16), _font, 0.4, (0, 0, 0), 2)
+        # cv2.putText(img, last_event, (16, 16), _font, 0.4, (255, 255, 255), 1)
 
         old_count = object_count
         frames += 1
