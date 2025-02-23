@@ -6,8 +6,6 @@ import queue
 import threading
 import numpy as np
 import math
-from datetime import datetime
-from ultralytics import YOLO
 import torch
 import torchvision
 import base64
@@ -15,15 +13,15 @@ import requests
 import json
 import pickle
 import sys
-import clip
 import torch.nn as nn
 from PIL import Image
-from transformers import BlipProcessor, BlipForConditionalGeneration
 from sklearn.cluster import DBSCAN
+from datetime import datetime
+from ultralytics import YOLO
 
 # from vdb import VectorDatabase
 
-model = "yolo12m"
+model = "yolo12s"
 rtsp_stream = (
     "rtsp://psychip:neuromancer1@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
 )
