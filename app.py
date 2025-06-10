@@ -7,33 +7,23 @@ import threading
 import numpy as np
 import math
 import torch
-import torchvision
 import base64
 import requests
 import json
-import pickle
 import sys
-import torch.nn as nn
-from PIL import Image
 from sklearn.cluster import DBSCAN
 from datetime import datetime
 from ultralytics import YOLO
 
-# from vdb import VectorDatabase
-
-model = "yolo12s"
+model = "yolo11n"
 rtsp_stream = (
-    "rtsp://psychip:neuromancer1@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
+    "rtsp://<your stream here>"
 )
-# rtsp_stream = "rtsp://192.168.1.5:8080/h264.sdp"
 
 ollama = "http://127.0.0.1:11434/api/generate"
 ollama_model = "llava:latest"
 
-# vsize = 512 # yolo11n:256 yolo11s:512
-
 _font = cv2.FONT_HERSHEY_SIMPLEX
-_gray = cv2.COLOR_BGR2GRAY
 
 point_timeout = 2500
 stationary_val = 16
@@ -62,7 +52,6 @@ class_confidence = {
     "tvmonitor": 0.80,
 }
 
-# change per scenerio, outdoor, indoor, jungle, mountain etc
 classlist = [
     "person",
     "car",
@@ -85,23 +74,12 @@ prompts = {
     "car": "get body type and color of this car in 5 words or less",
 }
 
-events = ["cars parked on the side of a road at night"]
-
-if os.path.exists("db/events.pkl"):
-    with open("db/events.pkl", "rb") as file:
-        events = pickle.load(file)
-
-with open("events.json", "w") as f:
-    json.dump(events, f, indent=2)
-
 snapshot_directory = "snapshots"
 
 frames = 0
 prev_frames = 0
 last_frame = 0
 fps = 0
-WINDOW_WIDTH = 0
-WINDOW_HEIGHT = 0
 recording = False
 out = None
 
@@ -120,133 +98,10 @@ drag_start_y = 0
 
 draw_start_x = 0
 draw_start_y = 0
-
 draw_end_x = 0
 draw_end_y = 0
 
-uispace = 0  # 300
-padding = 6  # px padding on each element
-"""
-print("Loading ViT..")
-cdevice = "cuda" if torch.cuda.is_available() else "cpu"
-cmodel, preprocess = clip.load("ViT-B/32", cdevice)
-last_event = ""
-last_caption = ""
-print("Loading BLIP..")
-bprocessor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
-bmodel = BlipForConditionalGeneration.from_pretrained(
-    "Salesforce/blip-image-captioning-large"
-).to(cdevice)
-
-print("Generating text features of " + str(len(events)))
-filtered_phrases = [
-    "there is",
-    "there are",
-    "they are",
-    "this is",
-    "these are",
-    "we can see",
-    "i see",
-    "appears to be",
-    "seems to be",
-    "looking at",
-    "showing",
-    "consisting of",
-    "made up of",
-    "in this image",
-    "in this picture",
-    "the image shows",
-    "the picture shows",
-    "what appears",
-    "what seems",
-    "can be seen",
-    "visible in",
-    "a photo of",
-    "a picture of",
-    "it is",
-    "that is",
-    "aerial view of",
-    "this is an image",
-    "overhead view of",
-    "flock of",
-    "rows of",
-    "row of",
-]
-
-ignore = []
-for phrase in filtered_phrases:
-    tokens = bprocessor.tokenizer(phrase, add_special_tokens=False)
-    if tokens.input_ids:
-        ignore.append([tokens.input_ids[0]])
-
-text_inputs = clip.tokenize(events).to(cdevice)
-text_features = cmodel.encode_text(text_inputs)
-text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
-"""
-
-
-def match_caption(image):
-    mstart = millis()
-    image = preprocess(Image.fromarray(image)).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        image_features = cmodel.encode_image(image)
-
-    image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
-    similarity = image_features @ text_features.T
-    similarity_score = similarity.max().item()
-    best_caption_idx = similarity.argmax().item()
-    mend = millis() - mstart
-    # print(f"Matched caption in {mend}ms")
-
-    return (events[best_caption_idx], similarity_score)
-
-
-def resolve(file_path):
-    if os.path.isabs(file_path):
-        directory = os.path.dirname(file_path)
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-        return file_path
-    else:
-        directory = os.path.dirname(file_path)
-        if directory and not os.path.exists(directory):
-            os.makedirs(directory)
-        return os.path.abspath(file_path)
-
-
-def extract_features(img_tensor, model, boxes):
-    features = []
-    feature_extractor = nn.Sequential(*list(model.model.model[:10])).to(device)
-
-    with torch.no_grad():
-        feature_maps = feature_extractor(img_tensor)
-
-    for box in boxes:
-        if hasattr(box, "xyxy") and isinstance(box.xyxy, torch.Tensor):
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-        elif hasattr(box, "xyxy") and isinstance(box.xyxy, list):
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-        else:
-            print(f"Unexpected box format: {type(box)}")
-            continue
-
-        stride = img_tensor.shape[2] / feature_maps.shape[2]
-        fm_x1, fm_y1 = int(x1 / stride), int(y1 / stride)
-        fm_x2, fm_y2 = int(x2 / stride), int(y2 / stride)
-
-        box_features = feature_maps[:, :, fm_y1:fm_y2, fm_x1:fm_x2]
-        box_features = nn.functional.adaptive_avg_pool2d(box_features, (1, 1))
-        features.append(box_features.flatten().cpu().numpy())
-
-    return features
-
-
-def preinit():
-    for folder in ["elements", "models", "recordings", "snapshots"]:
-        if not os.path.exists(folder):
-            os.makedirs(folder)
-            print(f"-- created folder: {folder}")
+padding = 6
 
 
 def transform(xmin, ymin, xmax, ymax, pad):
@@ -283,7 +138,7 @@ def rest(url, payload):
     headers = {"Content-Type": "application/json"}
     r = False
     try:
-        data = data = json.dumps(payload)
+        data = json.dumps(payload)
         response = requests.post(url, data, headers=headers)
         if response.status_code == 200:
             r = json.loads(response.text)
@@ -304,7 +159,7 @@ def timestamp():
     return int(time.time())
 
 
-labels = open(resolve("db/coco.names")).read().strip().split("\n")
+labels = open("db/coco.names").read().strip().split("\n")
 classlist = [labels.index(x) for x in classlist]
 
 object_count = 0
@@ -313,117 +168,48 @@ obj_break = millis()
 obj_idle = 0
 obj_list = []
 obj_max = 16
-obj_avg = 0
 fskip = False
 last_fskip = timestamp()
-app_start = timestamp()
 obj_score = labels
 
 bounding_boxes = []
 obj_number = 1
 
-
-def save_bounding_boxes(bounding_boxes, filename="db/bounding_boxes.pkl"):
-    with open(resolve(filename), "wb") as f:
-        pickle.dump(bounding_boxes, f)
-    print(f"Saved {len(bounding_boxes)} bounding boxes to {filename}")
-
-
-def load_bounding_boxes(filename="db/bounding_boxes.pkl"):
-    filename = resolve(filename)
-    if os.path.exists(filename):
-        with open(filename, "rb") as f:
-            bounding_boxes = pickle.load(f)
-        print(f"Loaded {len(bounding_boxes)} bounding boxes from {filename}")
-        return bounding_boxes
-    else:
-        print(f"No saved bounding boxes found at {filename}")
-        return []
-
-
-def crc32(string):
-    crc = 0xFFFFFFFF
-    for char in string:
-        byte = ord(char)
-        for _ in range(8):
-            if (crc ^ byte) & 1:
-                crc = (crc >> 1) ^ 0xEDB88320
-            else:
-                crc >>= 1
-            byte >>= 1
-    return crc ^ 0xFFFFFFFF
-
+# YOLO frame skipping optimization
+yolo_frame_count = 0
+yolo_skip_frames = 6
+cached_yolo_results = None
+zoom_pan_active = False
+zoom_pan_pause_time = 0
 
 def genprompt(t):
     if t in prompts:
         return prompts[t]
     return "describe this image in 5 words or less"
 
-
 def center(xmin, ymin, xmax, ymax):
     center_x = (xmin + xmax) // 2
     center_y = (ymin + ymax) // 2
     return (center_x, center_y)
 
-
-def distance(x1, y1, x2, y2):
-    return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-
-
 def _size(x1, y1, x2, y2):
     return abs(x1 - y2)
 
 
-def bearing(x1, y1, x2, y2):
-    delta_x = x2 - x1
-    delta_y = y2 - y1
-    bearing_rad = math.atan2(delta_y, delta_x)
-    bearing_deg = math.degrees(bearing_rad)
-    return (bearing_deg + 360) % 360
-
-
-def direction(bearing):
-    normalized_bearing = bearing % 360
-    directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-    index = round(normalized_bearing / 45) % 8
-    return directions[index]
-
-
-def similar(img1, img2):
-    hist1 = cv2.calcHist([img1], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-    hist2 = cv2.calcHist([img2], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-    return cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-
-
-def match(img1, img2):
-    max_val = 0
-    try:
-        result = cv2.matchTemplate(img1, img2, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, _ = cv2.minMaxLoc(result)
-    except Exception as e:
-        max_val = similar(img1, img2)
-        # print(f"An error occurred: {e}")
-    finally:
-        return max_val
-
-
-def open_app_folder():
-    app_folder = os.path.dirname(os.path.abspath(__file__))
-    if os.name == "nt":  # Windows
-        os.startfile(app_folder)
-    elif os.name == "posix":  # macOS and Linux
-        subprocess.call(["open" if os.name == "darwin" else "xdg-open", app_folder])
-
-
 def mouse_callback(event, x, y, flags, param):
-    global drawing, draw_start_x, draw_start_y, draw_end_x, draw_end_y, dragging, drag_start_x, drag_start_y, zoom_factor, pan_x, pan_y, zoom_x, zoom_y
+    global drawing, draw_start_x, draw_start_y, draw_end_x, draw_end_y, dragging, drag_start_x, drag_start_y, zoom_factor, pan_x, pan_y, zoom_pan_active, zoom_pan_pause_time, cached_yolo_results
     if event == cv2.EVENT_RBUTTONDOWN:
         dragging = True
+        zoom_pan_active = True
+        zoom_pan_pause_time = millis()
+        cached_yolo_results = None  # Clear cache when pan starts
         drag_start_x = x
         drag_start_y = y
 
     if event == cv2.EVENT_RBUTTONUP:
         dragging = False
+        zoom_pan_active = False
+        cached_yolo_results = None  # Clear cache when pan ends
 
     if event == cv2.EVENT_LBUTTONUP:
         drawing = False
@@ -440,6 +226,10 @@ def mouse_callback(event, x, y, flags, param):
         draw_start_y = y
 
     if event == cv2.EVENT_MOUSEWHEEL:
+        zoom_pan_active = True
+        zoom_pan_pause_time = millis()
+        cached_yolo_results = None  # Clear cache on zoom in/out
+
         if zoom_factor == 1.0:
             pan_x = 0
             pan_y = 0
@@ -471,50 +261,22 @@ class BoundingBox:
         self.nr = obj_number
         obj_number += 1
         self.x, self.y = points
-        self.px = 0
-        self.py = 0
         self.created = millis()
         self.timestamp = self.created
         self.size = size
-        self.sid = str(crc32(f"{self.x}-{self.y}-{self.timestamp}-{self.size}"))
         self.name = name
         self.checkin = True
         self.detections = 0
-        self.distance = 0
         self.idle = 0
         self.image = image
         self.desc = False
         self.state = 0
         self.seen = self.created
-        self.features = None
-        self.visible = True
 
         self.init()
         print(
             "New object: " + self.name + "#" + str(self.nr) + " size:" + str(self.size)
         )
-        self.save("elements/" + self.name + "-" + str(self.nr) + ".png")
-
-        """
-        vector_db.add_vector(self.features, {
-                'class': self.name,
-                'sid': self.sid
-            })"""
-
-    def hide(self):
-        self.visible = False
-
-    def show(self):
-        self.visible = True
-
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        del state["image"]
-        return state
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self.image = None
 
     def see(self):
         self.seen = millis()
@@ -527,9 +289,6 @@ class BoundingBox:
         else:
             self.idle = 0
         return self.idle
-
-    def save(self, file):
-        cv2.imwrite(file, self.image)
 
     def export(self):
         _, buffer = cv2.imencode(".png", self.image)
@@ -557,137 +316,15 @@ class BoundingBox:
             self.idle = idle // 1000
         else:
             self.idle = 0
-        self.px = self.x
-        self.py = self.y
         self.x = new_x
         self.y = new_y
         self.detections += 1
         self.init()
 
-    def update_in_array(self, time, new_x, new_y, bounding_boxes):
-        for bbox in bounding_boxes:
-            if bbox.sid == self.sid:
-                bbox.update(time, new_x, new_y)
-                return True
-            return False
-
 
 def resetIteration():
     global bounding_boxes
     [setattr(item, "checkin", False) for item in bounding_boxes]
-
-
-def closest(bounding_boxes, reference_point, class_name, size):
-    closest_bbox = False
-    min_distance = float("inf")
-
-    for bbox in bounding_boxes:
-        if abs(bbox.size - size) > 10:
-            continue
-
-        dx = bbox.x - reference_point[0]
-        dy = bbox.y - reference_point[1]
-        distance = math.sqrt(dx * dx + dy * dy)
-        if distance < 1 or distance > 300:
-            continue
-
-        if distance < min_distance:
-            min_distance = distance
-            closest_bbox = bbox
-
-    if closest_bbox != False and distance > 0:
-        closest_bbox.distance = distance
-        closest_bbox.update(millis(), reference_point[0], reference_point[1])
-    return closest_bbox
-
-
-def blur(image):
-    gray = cv2.cvtColor(image, _gray)
-    gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0)
-    gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1)
-    mag = np.sqrt(gx**2 + gy**2)
-    return np.mean(mag)
-
-
-def find_closest_point(points, point):
-    closest_point = None
-    min_distance = float("inf")
-
-    for x, y in points:
-        distance = math.sqrt((x - point[0]) ** 2 + (y - point[1]) ** 2)
-        if distance < min_distance:
-            min_distance = distance
-            closest_point = (x, y)
-
-    return closest_point, min_distance
-
-
-def findSimilar(ref):
-    closest_bbox = False
-    score = 0.85
-    for bbox in bounding_boxes:
-        s = similar(ref, bbox.image)
-        if s > score:
-            score = s
-            closest_bbox = bbox
-    # print("similar:"+str(score))
-    return closest_bbox
-
-
-def findMatch(ref):
-    closest_bbox = False
-    score = 0.96
-    for bbox in bounding_boxes:
-        s = match(ref, bbox.image)
-        if s > score:
-            score = s
-            closest_bbox = bbox
-    # print("score:"+str(score))
-    return closest_bbox
-
-
-def closestEx(bounding_boxes, reference_point, class_name, size):
-    return False
-
-    point = reference_point
-    found = []
-    for i in range(6):
-        c = closest(bounding_boxes, point, class_name, size)
-        if c == False and i == 0:
-            return False
-        if c == False and i > 0:
-            return found[-1]
-        if i == 1 and found[-1].sid == c.sid:
-            return c
-
-        point = (c.x, c.y)
-        found.append(c)
-        # print("iteration "+str(i))
-
-    return found[-1]
-
-
-def getObject(point, cname):
-    global bounding_boxes
-    x, y = point
-    time = millis()
-
-    for i, box in enumerate(bounding_boxes):
-        if cname != box.name:
-            continue
-
-        if box.contains(x, y, time):
-            box.update(time, x, y)
-            bounding_boxes[i].checkin = True
-            return bounding_boxes[i]
-
-        if (time - box.seen) >= point_timeout:
-            del bounding_boxes[i]
-
-        # if (time-box.seen) >= point_timeout:
-        #  box.hide()
-
-    return False
 
 
 def take_snapshot(frame):
@@ -761,7 +398,6 @@ def draw_dashed_rectangle(img, pt1, pt2, color, thickness=1, dash_length=8):
     draw_dashed_line(img, (pt2[0], pt1[1]), pt2, color, thickness, dash_length)
     draw_dashed_line(img, pt2, (pt1[0], pt2[1]), color, thickness, dash_length)
     draw_dashed_line(img, (pt1[0], pt2[1]), pt1, color, thickness, dash_length)
-
     return img
 
 
@@ -792,11 +428,6 @@ print(torch.cuda.is_available())
 print(torch.cuda.get_device_name(0))
 print(torch.version.cuda)
 
-print(f"PyTorch version: {torch.__version__}")
-print(f"Torchvision version: {torchvision.__version__}")
-print(f"CUDA available: {torch.cuda.is_available()}")
-print(f"CUDA version: {torch.version.cuda}")
-
 colors = generate_color_shades(len(labels))
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Initializing model..")
@@ -804,11 +435,7 @@ model = YOLO("models/" + model + ".pt")
 print(f"Loading model to {device}")
 model.to(device)
 
-# print("initializing vector store")
-# vector_db = VectorDatabase(vector_dimension=vsize)
-
 print("loading objects")
-# bounding_boxes = load_bounding_boxes()
 bounding_boxes = []
 
 loop = True
@@ -834,7 +461,7 @@ else:
     print("Stream resolution matches to window size")
 
 cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-cv2.resizeWindow(window, opsize[0] + uispace, opsize[1])
+cv2.resizeWindow(window, opsize[0], opsize[1])
 cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)
 cv2.setMouseCallback(window, mouse_callback)
 q = queue.Queue(maxsize=buffer)
@@ -842,7 +469,7 @@ q = queue.Queue(maxsize=buffer)
 
 def get_clusters(detected_points, eps=30, min_samples=2):
     if not isinstance(detected_points, np.ndarray) or detected_points.size == 0:
-        return {}  # Ensure detected_points is a valid NumPy array
+        return {}
 
     db = DBSCAN(eps=eps, min_samples=min_samples).fit(detected_points)
     labels = db.labels_
@@ -850,18 +477,18 @@ def get_clusters(detected_points, eps=30, min_samples=2):
     clusters = {}
     for label in set(labels):
         if label == -1:
-            continue  # Skip noise points
+            continue
         cluster_points = detected_points[labels == label]
 
         if cluster_points.size == 0:
-            continue  # Ensure cluster_points is not empty
+            continue
 
         min_x, min_y = np.min(cluster_points, axis=0)
         max_x, max_y = np.max(cluster_points, axis=0)
         count = len(cluster_points)
         clusters[label] = (min_x, min_y, max_x, max_y, count)
 
-    return clusters  # Always return the dictionary
+    return clusters
 
 
 def is_point_in_cluster(x, y, clusters):
@@ -873,7 +500,7 @@ def is_point_in_cluster(x, y, clusters):
 
 
 def stream():
-    global cap, obj_idle, last_fskip, idle
+    global cap, obj_idle, last_fskip
     if cap.isOpened():
         ret, frame = cap.read()
         while loop:
@@ -896,87 +523,36 @@ def stream():
                 cap = cv2.VideoCapture(rtsp_stream)
 
 
-def fmatch(img1, img2):
-    gray1 = cv2.cvtColor(img1, _gray)
-    gray2 = cv2.cvtColor(img2, _gray)
+def find_closest_point(points, point):
+    closest_point = None
+    min_distance = float("inf")
 
-    orb = cv2.ORB_create()
-    kp1, des1 = orb.detectAndCompute(gray1, None)
-    kp2, des2 = orb.detectAndCompute(gray2, None)
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = bf.match(des1, des2)
-    matches = sorted(matches, key=lambda x: x.distance)
-    img_matches = cv2.drawMatches(
-        img1,
-        kp1,
-        img2,
-        kp2,
-        matches[:50],
-        None,
-        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
-    )
+    for x, y in points:
+        distance = math.sqrt((x - point[0]) ** 2 + (y - point[1]) ** 2)
+        if distance < min_distance:
+            min_distance = distance
+            closest_point = (x, y)
 
-    src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-    dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-    M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-
-    h, w = gray2.shape
-    aligned_img1 = cv2.warpPerspective(img1, M, (w, h))
-
-    diff = cv2.absdiff(cv2.cvtColor(aligned_img1, _gray), gray2)
-
-    _, thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
-
-    kernel = np.ones((5, 5), np.uint8)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    img1_contours = aligned_img1.copy()
-    img2_contours = img2.copy()
-
-    for contour in contours:
-        if cv2.contourArea(contour) > 100:
-            cv2.drawContours(img1_contours, [contour], 0, (0, 0, 255), 2)
-            cv2.drawContours(img2_contours, [contour], 0, (0, 255, 0), 2)
+    return closest_point, min_distance
 
 
-def selectObject(sid, x, y):
-    i = 0
-    while i < len(bounding_boxes):
-        # print(i)
-        bbox = bounding_boxes[i]
-        if bbox.sid == sid and bbox.checkin == False:
-            bbox.update(millis(), x, y)
-            bounding_boxes[i].checkin = True
-            return bounding_boxes[i]
-        else:
-            i += 1
+def getObject(point, cname):
+    global bounding_boxes
+    x, y = point
+    time = millis()
 
-    return False
-
-
-"""
-def find_similar_objects(query_vector, class_name, k=5):
-    results = vector_db.search_similar(query_vector, k)
-
-    _sid = False
-    _c = 25
-
-    for metadata, distance in results:
-        if distance >= 1:
+    for i, box in enumerate(bounding_boxes):
+        if cname != box.name:
             continue
 
-        if distance < _c:
-            _c = distance
-            _sid = metadata["sid"]
+        if box.contains(x, y, time):
+            box.update(time, x, y)
+            bounding_boxes[i].checkin = True
+            return bounding_boxes[i]
 
-        # print(f"SID: {metadata['sid']}")
-        # print(f"Distance: {distance}")
-        # print("---")
-    return _sid
-"""
+        if (time - box.seen) >= point_timeout:
+            del bounding_boxes[i]
+    return False
 
 
 def is_point_inside(x, y, list):
@@ -990,31 +566,52 @@ def process(photo):
     if hdstream == True:
         img = resample(photo)
 
-    global obj_score, bounding_boxes
+    global obj_score, bounding_boxes, yolo_frame_count, cached_yolo_results, zoom_pan_active, zoom_pan_pause_time, dragging
 
-    img_tensor = (
-        torch.from_numpy(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).to(device).float()
-        / 255.0
-    )
-    img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
+    # Check if zoom/pan operation finished recently (wait 500ms after last activity)
+    current_time = millis()
+    if zoom_pan_active and not dragging and (current_time - zoom_pan_pause_time > 500):
+        zoom_pan_active = False
+        cached_yolo_results = None  # Clear cache when zoom/pan timeout ends
 
-    with torch.no_grad():
-        results = model(
-            img_tensor,
-            verbose=False,
-            iou=0.45,
-            agnostic_nms=True,
-            half=False,
-            max_det=32,
-            conf=min_confidence,
-            classes=classlist,
-        )
+    # Skip YOLO inference during zoom/pan operations
+    if zoom_pan_active or dragging:
+        # Use last cached results during zoom/pan
+        results = cached_yolo_results
+    else:
+        # Run YOLO inference only every 3rd frame when not zooming/panning
+        if yolo_frame_count % yolo_skip_frames == 0:
+            img_tensor = (
+                torch.from_numpy(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                .to(device)
+                .float()
+                / 255.0
+            )
+            img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
+
+            with torch.no_grad():
+                results = model(
+                    img_tensor,
+                    verbose=False,
+                    iou=0.45,
+                    half=False,
+                    max_det=32,
+                    conf=min_confidence,
+                    classes=classlist,
+                )
+
+            # Cache the results for next 2 frames
+            cached_yolo_results = results
+        else:
+            # Use cached results from previous YOLO inference
+            results = cached_yolo_results
+
+        yolo_frame_count += 1
 
     obj_score = [0 for _ in range(len(obj_score))]
     c = 0
     points = []
-    boxes = [box for r in results for box in r.boxes]
-    features = extract_features(img_tensor, model, boxes)
+    boxes = [box for r in results for box in r.boxes] if results else []
     now = millis()
     resetIteration()
 
@@ -1080,19 +677,6 @@ def process(photo):
                 img[ymin : ymax + 1, xmin : xmax + 1],
             )
             draw_dashed_rectangle(img, (xmin, ymin), (xmax, ymax), color, 1, 8)
-
-            cv2.putText(
-                img, text, (text_offset_x, text_offset_y), _font, 0.35, (0, 0, 0), 2
-            )
-            cv2.putText(
-                img,
-                text,
-                (text_offset_x, text_offset_y),
-                _font,
-                0.35,
-                (255, 255, 255),
-                1,
-            )
             continue
 
         idx = class_id
@@ -1119,155 +703,40 @@ def process(photo):
             color = colors[class_id].tolist()
 
             cv2.circle(img, point, 1, (0, 0, 255), 2)
-            cv2.putText(img, sid, (obj.x, obj.y - 18), _font, 0.35, (0, 0, 0), 2)
-            cv2.putText(img, sid, (obj.x, obj.y - 18), _font, 0.35, (255, 255, 255), 1)
 
             idle = str(obj.idle) + "s"
+
             cv2.putText(img, idle, (obj.x, obj.y - 6), _font, 0.35, (0, 0, 0), 2)
             cv2.putText(img, idle, (obj.x, obj.y - 6), _font, 0.35, (200, 200, 200), 1)
 
         else:
-            obj = closestEx(bounding_boxes, point, class_name, size)
-            if obj != False:
-                print(
-                    "picked up "
-                    + str(obj.nr)
-                    + "#"
-                    + obj.name
-                    + " from "
-                    + str(obj.distance)
-                )
-                cv2.line(img, point, (obj.x, obj.y), (0, 255, 255), 4)
-                obj.see()
+            text = f"{class_name}" + " " + str(round(confidence, 6))
+            text_offset_x = xmin
+            text_offset_y = ymin - 5
 
-                if obj.desc != False:
-                    sid = obj.desc
-                else:
-                    sid = obj.name + "#" + str(obj.nr)
-
-                cv2.circle(img, point, 1, (0, 255, 0), 2)
-
-                cv2.putText(img, sid, (obj.x, obj.y - 18), _font, 0.35, (0, 0, 0), 2)
-                cv2.putText(
-                    img, sid, (obj.x, obj.y - 18), _font, 0.35, (255, 255, 255), 1
-                )
-
-                idle = str(obj.idle) + "s"
-                cv2.putText(img, idle, (obj.x, obj.y - 6), _font, 0.35, (0, 0, 0), 2)
-                cv2.putText(
-                    img, idle, (obj.x, obj.y - 6), _font, 0.35, (200, 200, 200), 1
-                )
-            else:
-                if distance < 6.0:
-                    continue
-                text = f"{class_name}" + " " + str(round(confidence, 6))
-                text_offset_x = xmin
-                text_offset_y = ymin - 5
-
-                # _sid = find_similar_objects(features[i],class_name)
-                _sid = False
-                if _sid != False:
-                    obj = selectObject(_sid, point[0], point[1])
-                    print(str(obj))
-                    if obj != False:
-                        print(
-                            "restored "
-                            + str(obj.nr)
-                            + "#"
-                            + obj.name
-                            + "#"
-                            + str(obj.desc)
-                            + " from vector store"
-                        )
-                        cv2.line(img, point, (obj.px, obj.py), (0, 255, 0), 4)
-                        cv2.circle(img, point, 1, (0, 255, 0), 3)
-                        obj.see()
-                        sid = (
-                            obj.desc
-                            if obj.desc != False
-                            else obj.name + "#" + str(obj.nr)
-                        )
-                        cv2.putText(
-                            img, sid, (obj.x, obj.y - 18), _font, 0.35, (0, 0, 0), 2
-                        )
-                        cv2.putText(
-                            img,
-                            sid,
-                            (obj.x, obj.y - 18),
-                            _font,
-                            0.35,
-                            (255, 255, 255),
-                            1,
-                        )
-                        idle = str(obj.idle) + "s"
-                        cv2.putText(
-                            img, idle, (obj.x, obj.y - 6), _font, 0.35, (0, 0, 0), 2
-                        )
-                        cv2.putText(
-                            img,
-                            idle,
-                            (obj.x, obj.y - 6),
-                            _font,
-                            0.35,
-                            (200, 200, 200),
-                            1,
-                        )
-                    else:
-                        if distance < 6.0:
-                            continue
-                        cv2.circle(img, point, 1, (255, 255, 0), 2)
-                        cv2.putText(
-                            img,
-                            text,
-                            (text_offset_x, text_offset_y),
-                            _font,
-                            0.35,
-                            (0, 0, 0),
-                            2,
-                        )
-                        cv2.putText(
-                            img,
-                            text,
-                            (text_offset_x, text_offset_y),
-                            _font,
-                            0.35,
-                            (255, 255, 255),
-                            1,
-                        )
-                        qxmin, qymin, qxmax, qymax = transform(
-                            xmin, ymin, xmax, ymax, padding
-                        )
-                        snap = photo[qymin:qymax, qxmin:qxmax]
-                        item = BoundingBox(class_name, point, size, snap, features[i])
-                        bounding_boxes.append(item)
-                else:
-                    if distance < 6.0:
-                        continue
-                    cv2.circle(img, point, 1, (255, 255, 0), 2)
-                    cv2.putText(
-                        img,
-                        text,
-                        (text_offset_x, text_offset_y),
-                        _font,
-                        0.35,
-                        (0, 0, 0),
-                        2,
-                    )
-                    cv2.putText(
-                        img,
-                        text,
-                        (text_offset_x, text_offset_y),
-                        _font,
-                        0.35,
-                        (255, 255, 255),
-                        1,
-                    )
-                    qxmin, qymin, qxmax, qymax = transform(
-                        xmin, ymin, xmax, ymax, padding
-                    )
-                    snap = photo[qymin:qymax, qxmin:qxmax]
-                    item = BoundingBox(class_name, point, size, snap)
-                    bounding_boxes.append(item)
+            cv2.circle(img, point, 1, (255, 255, 0), 2)
+            cv2.putText(
+                img,
+                text,
+                (text_offset_x, text_offset_y),
+                _font,
+                0.35,
+                (0, 0, 0),
+                2,
+            )
+            cv2.putText(
+                img,
+                text,
+                (text_offset_x, text_offset_y),
+                _font,
+                0.35,
+                (255, 255, 255),
+                1,
+            )
+            qxmin, qymin, qxmax, qymax = transform(xmin, ymin, xmax, ymax, padding)
+            snap = photo[qymin:qymax, qxmin:qxmax]
+            item = BoundingBox(class_name, point, size, snap)
+            bounding_boxes.append(item)
 
     if zoom_factor > 1.0:
         add(c)
@@ -1294,7 +763,7 @@ def process(photo):
             and obj.idle > 1
             and obj.idle < 8
         ):
-            closest, distance = find_closest_point(points, (obj.x, obj.y))
+            _, distance = find_closest_point(points, (obj.x, obj.y))
             if distance < 6.0:
                 continue
 
@@ -1312,139 +781,20 @@ def process(photo):
 
             idle = str(obj.idle) + "s"
 
-            cv2.putText(img, sid, (obj.x, obj.y - 18), _font, 0.35, (0, 0, 0), 2)
-            cv2.putText(img, sid, (obj.x, obj.y - 18), _font, 0.35, (255, 255, 255), 1)
             cv2.circle(img, (obj.x, obj.y), 1, (0, 255, 255), 2)
-            cv2.putText(img, idle, (obj.x, obj.y - 6), _font, 0.35, (0, 0, 0), 2)
-            cv2.putText(img, idle, (obj.x, obj.y - 6), _font, 0.35, (200, 200, 200), 1)
+
     add(c)
     return img
 
 
-def uilayer(img):
-    height, width = img.shape[:2]
-
-    new_height = height
-    new_width = width + uispace
-
-    background_color = [64, 64, 64]
-    enlarged_img = np.full((new_height, new_width, 3), background_color, dtype=np.uint8)
-
-    enlarged_img[:height, :width] = img
-
-    cv2.putText(
-        enlarged_img,
-        "Your text description here",
-        (width + 24, 24),
-        _font,
-        0.5,
-        (255, 255, 255),
-        1,
-        1,
-    )
-    return enlarged_img
-
-
-def generate_caption(img):
-    inputs = bprocessor(
-        img,
-        return_tensors="pt",
-    ).to(device)
-
-    with torch.no_grad():
-        output = bmodel.generate(
-            **inputs,
-            bad_words_ids=ignore,
-        )
-    return bprocessor.decode(output[0], skip_special_tokens=True)
-
-
-def take_caption(img):
-    global last_caption
-    tstart = millis()
-    caption = generate_caption(img)
-    tend = millis() - tstart
-    print(f"Caption generated in {tend}ms")
-
-    if caption == last_caption:
-        return
-    last_caption = caption
-
-    if caption in events:
-        print("-- " + caption)
-        return
-
-    events.append(caption)
-    print("New Event >> " + caption)
-
-
-mbuf = None
-cbuf = None
-cf = 0
-cl = 0
-
-ct = 0
-lt = 0
-
-mt = 0
-ml = 0
-
-
-def captioner():
-    global loop, mbuf, cbuf, ct, lt, mt, ml, last_event
-    time.sleep(3)
-    while loop:
-        if ct == 0 or mt == 0:
-            time.sleep(0.01)
-            continue
-
-        if ct > lt:
-            lt = ct
-            caption, score = match_caption(cbuf)
-            if caption != last_event:
-                print("match: " + caption)
-                print("score: " + str(score))
-                last_event = caption
-
-        if mt > ml:
-            ml = mt
-            take_caption(mbuf)
-        time.sleep(0.1)
-
-
-def postreview():
-    global bounding_boxes, loop
-    time.sleep(3)
-    while loop:
-        for box in bounding_boxes:
-            if (box.state == 0) and (box.image is not None):
-                res = rest(
-                    ollama,
-                    {
-                        "model": ollama_model,
-                        "prompt": genprompt(box.name),
-                        "images": [box.export()],
-                        "stream": False,
-                    },
-                )
-                if res != False:
-                    box.desc = res["response"].strip()
-                    box.state = 1
-        time.sleep(0.1)
-
-
-cthread = threading.Thread(target=captioner)
-bthread = threading.Thread(target=postreview)
 sthread = threading.Thread(target=stream)
-
 print(f"Starting..")
 
-# cthread.start()
-# bthread.start()
 sthread.start()
 
 while loop:
     if (q.empty() != True) and (fskip != True):
+
         img = q.get_nowait()
 
         key = cv2.waitKey(1) & 0xFF
@@ -1466,24 +816,7 @@ while loop:
             take_snapshot(img)
             q.queue.clear()
 
-        elif key == ord("c"):
-            take_caption(img)
-            q.queue.clear()
-
         start = time.perf_counter_ns()
-
-        cf += 1
-        if cf >= 120:
-            cf = 0
-            cbuf = img
-            ct = millis()
-
-        cl += 1
-        if cl >= 240:
-            cl = 0
-            mbuf = img
-            mt = millis()
-
         img = process(img)
 
         object_count = average()
@@ -1492,9 +825,6 @@ while loop:
             obj_idle = 0
         else:
             obj_idle = millis() - obj_break
-
-        # cv2.putText(img, last_event, (16, 16), _font, 0.4, (0, 0, 0), 2)
-        # cv2.putText(img, last_event, (16, 16), _font, 0.4, (255, 255, 255), 1)
 
         old_count = object_count
         frames += 1
@@ -1506,22 +836,10 @@ while loop:
         duration = time.perf_counter_ns() - start
 
         _fps = "FPS: " + str(fps) + " - LAG: " + str(duration // 1000000) + "ms"
-        text_size = cv2.getTextSize(_fps, _font, 0.5, 1)[0]
-        text_x = 16
         text_y = img.shape[0] - 5
-        cv2.putText(img, _fps, (text_x, text_y), _font, 0.4, (0, 0, 0), 2)
-        cv2.putText(img, _fps, (text_x, text_y), _font, 0.4, (0, 255, 0), 1)
+        cv2.putText(img, _fps, (16, text_y), _font, 0.4, (0, 0, 0), 2)
+        cv2.putText(img, _fps, (16, text_y), _font, 0.4, (0, 255, 0), 1)
 
-        """
-        line = 16
-        _t = line*2
-        for i, s in enumerate(obj_score):
-         if(s>0):
-          _s = labels[i]+": "+str(s)
-          cv2.putText(img, _s, (16, _t), _font, 0.4, (0, 0, 0), 2)        
-          cv2.putText(img, _s, (16, _t), _font, 0.4, (255, 255, 255), 1)
-          _t = _t+line   
-        """
         if recording:
             out.write(img)
             cv2.putText(img, "REC", (16, img.shape[0] - 38), _font, 0.5, (0, 0, 0), 2)
@@ -1557,25 +875,13 @@ while loop:
                 thickness=2,
             )
 
-        # img = uilayer(img)
         cv2.imshow(str(rtsp_stream), img)
     else:
         fskip = False
         time.sleep(0.01)
 
-print("saving events list..")
-with open("db/events.pkl", "wb") as file:
-    pickle.dump(events, file)
-
-# print("saving vector index..")
-# vector_db.save_index()
-
-# print("saving found objects..")
-# save_bounding_boxes(bounding_boxes)
 print("closing cv window..")
 cv2.destroyAllWindows()
 print("terminating..")
 loop = False
-# bthread.join()
-# sthread.join()
 sys.exit(0)
