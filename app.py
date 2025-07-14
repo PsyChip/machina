@@ -1,24 +1,17 @@
 print(f"Initializing..")
+# Essential imports for basic video streaming
 import time
 import os
 import cv2
 import queue
 import threading
-import numpy as np
-import math
-import torch
-import base64
-import requests
-import json
 import sys
-from sklearn.cluster import DBSCAN
 from datetime import datetime
-from ultralytics import YOLO
+
+# Heavy imports will be loaded in background
 
 model = "yolo11n"
-rtsp_stream = (
-    "rtsp://<your stream here>"
-)
+rtsp_stream = ("")
 
 ollama = "http://127.0.0.1:11434/api/generate"
 ollama_model = "llava:latest"
@@ -89,12 +82,15 @@ streamsize = (0, 0)
 zoom_factor = 1.0
 pan_x = 0
 pan_y = 0
+zoom_mode_active = False
+stored_bounding_boxes = []
 
 hdstream = False
 drawing = False
 dragging = False
 drag_start_x = 0
 drag_start_y = 0
+military_mode = False
 
 draw_start_x = 0
 draw_start_y = 0
@@ -102,7 +98,6 @@ draw_end_x = 0
 draw_end_y = 0
 
 padding = 6
-
 
 def transform(xmin, ymin, xmax, ymax, pad):
     x_scale = streamsize[0] / opsize[0]
@@ -113,7 +108,6 @@ def transform(xmin, ymin, xmax, ymax, pad):
     new_xmax = int(xmax * x_scale) + pad
     new_ymax = int(ymax * y_scale) + pad
     return (new_xmin, new_ymin, new_xmax, new_ymax)
-
 
 def resample(frame):
     global zoom_factor, pan_x, pan_y, streamsize, opsize
@@ -133,7 +127,6 @@ def resample(frame):
 
     return cv2.resize(zoomed_frame, opsize, interpolation=cv2.INTER_LINEAR_EXACT)
 
-
 def rest(url, payload):
     headers = {"Content-Type": "application/json"}
     r = False
@@ -150,14 +143,71 @@ def rest(url, payload):
     finally:
         return r
 
-
 def millis():
     return round(time.perf_counter() * 1000)
 
+def format_duration(seconds):
+    """Convert seconds to human readable format like 1h20m5s, 10m, 5s"""
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        remaining_seconds = seconds % 60
+        if remaining_seconds == 0:
+            return f"{minutes}m"
+        else:
+            return f"{minutes}m{remaining_seconds}s"
+    else:
+        hours = seconds // 3600
+        remaining_minutes = (seconds % 3600) // 60
+        remaining_seconds = seconds % 60
+        if remaining_minutes == 0 and remaining_seconds == 0:
+            return f"{hours}h"
+        elif remaining_seconds == 0:
+            return f"{hours}h{remaining_minutes}m"
+        else:
+            return f"{hours}h{remaining_minutes}m{remaining_seconds}s"
+
+def toggle_fullscreen():
+    """Toggle between fullscreen and windowed mode"""
+    global fullscreen, window
+    
+    if fullscreen:
+        # Exit fullscreen
+        cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(window, original_window_size[0], original_window_size[1])
+        fullscreen = False
+        print("Exited fullscreen")
+    else:
+        # Enter fullscreen
+        cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        fullscreen = True
+        print("Entered fullscreen")
+
+def window_resize_callback(val):
+    """Callback for window resize events to maintain aspect ratio"""
+    global window_aspect_ratio, original_window_size
+    
+    # Get current window size
+    try:
+        # This is a workaround since OpenCV doesn't provide direct window size callbacks
+        # We'll handle aspect ratio preservation in the main loop
+        pass
+    except:
+        pass
+
+
+def reset_window_to_stream_resolution():
+    """Reset window size to match stream resolution"""
+    global window, streamsize, original_window_size   
+    reset_size = opsize
+    
+    cv2.resizeWindow(window, reset_size[0], reset_size[1])
+    original_window_size = reset_size
+    print(f"Reset window to {reset_size[0]}x{reset_size[1]}")
 
 def timestamp():
     return int(time.time())
-
 
 labels = open("db/coco.names").read().strip().split("\n")
 classlist = [labels.index(x) for x in classlist]
@@ -175,12 +225,18 @@ obj_score = labels
 bounding_boxes = []
 obj_number = 1
 
-# YOLO frame skipping optimization
 yolo_frame_count = 0
-yolo_skip_frames = 6
+yolo_skip_frames = 3
 cached_yolo_results = None
 zoom_pan_active = False
 zoom_pan_pause_time = 0
+
+# Window management variables
+fullscreen = False
+window_aspect_ratio = 4/3  # Default aspect ratio
+original_window_size = (640, 480)
+last_click_time = 0
+double_click_threshold = 300  # milliseconds
 
 def genprompt(t):
     if t in prompts:
@@ -195,9 +251,8 @@ def center(xmin, ymin, xmax, ymax):
 def _size(x1, y1, x2, y2):
     return abs(x1 - y2)
 
-
 def mouse_callback(event, x, y, flags, param):
-    global drawing, draw_start_x, draw_start_y, draw_end_x, draw_end_y, dragging, drag_start_x, drag_start_y, zoom_factor, pan_x, pan_y, zoom_pan_active, zoom_pan_pause_time, cached_yolo_results
+    global drawing, draw_start_x, draw_start_y, draw_end_x, draw_end_y, dragging, drag_start_x, drag_start_y, zoom_factor, pan_x, pan_y, zoom_pan_active, zoom_pan_pause_time, cached_yolo_results, zoom_mode_active, stored_bounding_boxes, bounding_boxes, fullscreen, last_click_time, double_click_threshold, window
     if event == cv2.EVENT_RBUTTONDOWN:
         dragging = True
         zoom_pan_active = True
@@ -219,25 +274,49 @@ def mouse_callback(event, x, y, flags, param):
         draw_start_y = 0
 
     if event == cv2.EVENT_LBUTTONDOWN:
-        drawing = True
-        draw_end_x = 0
-        draw_end_y = 0
-        draw_start_x = x
-        draw_start_y = y
+        # Check for double-click
+        current_time = millis()
+        if current_time - last_click_time < double_click_threshold:
+            # Double-click detected - toggle fullscreen
+            toggle_fullscreen()
+        else:
+            # Single click - start drawing
+            drawing = True
+            draw_end_x = 0
+            draw_end_y = 0
+            draw_start_x = x
+            draw_start_y = y
+        last_click_time = current_time
 
     if event == cv2.EVENT_MOUSEWHEEL:
         zoom_pan_active = True
         zoom_pan_pause_time = millis()
         cached_yolo_results = None  # Clear cache on zoom in/out
 
-        if zoom_factor == 1.0:
+        # Store objects when entering zoom mode
+        if zoom_factor == 1.0 and not zoom_mode_active:
             pan_x = 0
             pan_y = 0
-
+        
+        old_zoom_factor = zoom_factor
+        
         if flags > 0:
             zoom_factor = min(6.0, zoom_factor * 1.1)
         else:
             zoom_factor = max(1.0, zoom_factor / 1.1)
+            
+        # Entering zoom mode - store current tracking state
+        if old_zoom_factor == 1.0 and zoom_factor > 1.0 and not zoom_mode_active:
+            stored_bounding_boxes = copy.deepcopy(bounding_boxes)
+            zoom_mode_active = True
+            print(f"Entering zoom mode - stored {len(stored_bounding_boxes)} objects")
+            
+        # Exiting zoom mode - restore tracking state only when returning to 1.0x
+        elif zoom_factor == 1.0 and zoom_mode_active:
+            zoom_mode_active = False
+            bounding_boxes = copy.deepcopy(stored_bounding_boxes)
+            stored_bounding_boxes = []
+            print(f"Exiting zoom mode - restored {len(bounding_boxes)} objects")
 
     if event == cv2.EVENT_MOUSEMOVE:
         if drawing:
@@ -272,6 +351,7 @@ class BoundingBox:
         self.desc = False
         self.state = 0
         self.seen = self.created
+        self.disappeared_cycles = 0  # Track consecutive disappearance cycles
 
         self.init()
         print(
@@ -319,12 +399,19 @@ class BoundingBox:
         self.x = new_x
         self.y = new_y
         self.detections += 1
+        self.disappeared_cycles = 0  # Reset disappearance counter when object is detected
         self.init()
 
 
 def resetIteration():
     global bounding_boxes
-    [setattr(item, "checkin", False) for item in bounding_boxes]
+    # Reset checkin status and increment disappeared_cycles for objects not seen
+    for item in bounding_boxes:
+        if item.checkin:
+            item.disappeared_cycles = 0  # Reset counter if object was seen
+        else:
+            item.disappeared_cycles += 1  # Increment if object not detected
+        item.checkin = False
 
 
 def take_snapshot(frame):
@@ -377,21 +464,18 @@ def average():
 
 def draw_dashed_rectangle(img, pt1, pt2, color, thickness=1, dash_length=8):
     def draw_dashed_line(img, pt1, pt2, color, thickness, dash_length):
-        dist = np.sqrt((pt1[0] - pt2[0]) ** 2 + (pt1[1] - pt2[1]) ** 2)
+        import math
+        dist = math.sqrt((pt1[0] - pt2[0]) ** 2 + (pt1[1] - pt2[1]) ** 2)
         dashes = int(dist / dash_length)
         for i in range(dashes):
-            start = np.array(
-                [
-                    int(pt1[0] + (pt2[0] - pt1[0]) * i / dashes),
-                    int(pt1[1] + (pt2[1] - pt1[1]) * i / dashes),
-                ]
-            )
-            end = np.array(
-                [
-                    int(pt1[0] + (pt2[0] - pt1[0]) * (i + 0.5) / dashes),
-                    int(pt1[1] + (pt2[1] - pt1[1]) * (i + 0.5) / dashes),
-                ]
-            )
+            start = [
+                int(pt1[0] + (pt2[0] - pt1[0]) * i / dashes),
+                int(pt1[1] + (pt2[1] - pt1[1]) * i / dashes),
+            ]
+            end = [
+                int(pt1[0] + (pt2[0] - pt1[0]) * (i + 0.5) / dashes),
+                int(pt1[1] + (pt2[1] - pt1[1]) * (i + 0.5) / dashes),
+            ]
             cv2.line(img, tuple(start), tuple(end), color, thickness)
 
     draw_dashed_line(img, pt1, (pt2[0], pt1[1]), color, thickness, dash_length)
@@ -402,6 +486,7 @@ def draw_dashed_rectangle(img, pt1, pt2, color, thickness=1, dash_length=8):
 
 
 def generate_color_shades(num_classes):
+    # This function will be called after numpy is imported
     colors = np.zeros((num_classes, 3), dtype=np.uint8)
 
     green = [0, 200, 0]
@@ -422,22 +507,19 @@ def generate_color_shades(num_classes):
         colors[i] = shade.astype(np.uint8)
     return colors
 
+# start showing the stream in this line
+
+# Global variables for background loading
+yolo_model_loaded = False
+yolo_model = None
+yolo_loading_complete = False
+basic_stream_mode = True
+colors = None
+device = None
 
 print(f"Starting up..")
-print(torch.cuda.is_available())
-print(torch.cuda.get_device_name(0))
-print(torch.version.cuda)
 
-colors = generate_color_shades(len(labels))
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Initializing model..")
-model = YOLO("models/" + model + ".pt")
-print(f"Loading model to {device}")
-model.to(device)
-
-print("loading objects")
-bounding_boxes = []
-
+# Initialize stream immediately
 loop = True
 cap = cv2.VideoCapture(rtsp_stream)
 
@@ -454,6 +536,14 @@ streamsize = (
     int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
 )
 
+# Calculate aspect ratio from stream
+if streamsize[0] > 0 and streamsize[1] > 0:
+    window_aspect_ratio = streamsize[0] / streamsize[1]
+    original_window_size = streamsize
+else:
+    window_aspect_ratio = opsize[0] / opsize[1]
+    original_window_size = opsize
+
 if streamsize[0] > opsize[0] or streamsize[1] > opsize[1]:
     hdstream = True
     print("HD stream mode enabled")
@@ -465,6 +555,60 @@ cv2.resizeWindow(window, opsize[0], opsize[1])
 cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)
 cv2.setMouseCallback(window, mouse_callback)
 q = queue.Queue(maxsize=buffer)
+
+# Background loading function
+def load_yolo_and_components():
+    """Load YOLO model and other components in background"""
+    global yolo_model_loaded, yolo_model, yolo_loading_complete, model, device, colors, bounding_boxes
+    
+    print(f"Loading heavy imports and YOLO model in background...")
+    
+    # Import heavy libraries in background
+    import numpy as np
+    import math
+    import torch
+    import base64
+    import requests
+    import json
+    import copy
+    from sklearn.cluster import DBSCAN
+    from ultralytics import YOLO
+    
+    # Make imports available globally
+    globals()['np'] = np
+    globals()['math'] = math
+    globals()['torch'] = torch
+    globals()['base64'] = base64
+    globals()['requests'] = requests
+    globals()['json'] = json
+    globals()['copy'] = copy
+    globals()['DBSCAN'] = DBSCAN
+    globals()['YOLO'] = YOLO
+    
+    print(torch.cuda.is_available())
+    print(torch.cuda.get_device_name(0))
+    print(torch.version.cuda)
+    
+    colors = generate_color_shades(len(labels))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Initializing model..")
+    yolo_model = YOLO("models/" + model + ".pt")
+    print(f"Loading model to {device}")
+    yolo_model.to(device)
+    
+    print("loading objects")
+    bounding_boxes = []
+    
+    # Update global model reference
+    model = yolo_model
+    yolo_model_loaded = True
+    yolo_loading_complete = True
+    print("YOLO model loaded successfully! Switching to full processing mode.")
+
+# Start background loading thread
+yolo_thread = threading.Thread(target=load_yolo_and_components)
+yolo_thread.daemon = True
+yolo_thread.start()
 
 
 def get_clusters(detected_points, eps=30, min_samples=2):
@@ -550,7 +694,8 @@ def getObject(point, cname):
             bounding_boxes[i].checkin = True
             return bounding_boxes[i]
 
-        if (time - box.seen) >= point_timeout:
+        # Remove objects that have been missing for 3+ consecutive cycles
+        if box.disappeared_cycles >= 3:
             del bounding_boxes[i]
     return False
 
@@ -562,11 +707,43 @@ def is_point_inside(x, y, list):
     return False
 
 
+def process_basic_stream(photo):
+    """Basic stream processing without YOLO - just display the video"""
+    # Simple resize if needed, avoiding resample which might use numpy
+    if hdstream == True:
+        img = cv2.resize(photo, opsize, interpolation=cv2.INTER_LINEAR)
+    else:
+        img = photo.copy()
+
+    # Apply military mode processing
+    if military_mode:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        img = cv2.convertScaleAbs(img, alpha=1.2, beta=10)
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    # Add loading indicator
+    if not yolo_loading_complete:
+        cv2.putText(img, "Loading YOLO model...", (16, 30), _font, 0.5, (0, 0, 0), 2)
+        cv2.putText(img, "Loading YOLO model...", (16, 30), _font, 0.5, (0, 255, 255), 1)
+    else:
+        cv2.putText(img, "YOLO model ready! Switching automatically...", (16, 30), _font, 0.5, (0, 0, 0), 2)
+        cv2.putText(img, "YOLO model ready! Switching automatically...", (16, 30), _font, 0.5, (0, 255, 0), 1)
+
+    return img
+
 def process(photo):
     if hdstream == True:
         img = resample(photo)
+    else:
+        img = photo.copy()
 
-    global obj_score, bounding_boxes, yolo_frame_count, cached_yolo_results, zoom_pan_active, zoom_pan_pause_time, dragging
+    # Apply military mode processing
+    if military_mode:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        img = cv2.convertScaleAbs(img, alpha=1.2, beta=10)
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    global obj_score, bounding_boxes, yolo_frame_count, cached_yolo_results, zoom_pan_active, zoom_pan_pause_time, dragging, zoom_mode_active
 
     # Check if zoom/pan operation finished recently (wait 500ms after last activity)
     current_time = millis()
@@ -613,7 +790,10 @@ def process(photo):
     points = []
     boxes = [box for r in results for box in r.boxes] if results else []
     now = millis()
-    resetIteration()
+    
+    # Only reset iteration when not in zoom mode
+    if not zoom_mode_active:
+        resetIteration()
 
     rawcrowd = []
 
@@ -702,9 +882,12 @@ def process(photo):
 
             color = colors[class_id].tolist()
 
-            cv2.circle(img, point, 1, (0, 0, 255), 2)
+            if military_mode and (class_name == "person" or class_name == "car"):
+                cv2.rectangle(img, (xmin, ymin), (xmax, ymax), (0, 0, 255), 2)
+            else:
+                cv2.circle(img, point, 1, (0, 0, 255), 2)
 
-            idle = str(obj.idle) + "s"
+            idle = format_duration(obj.idle)
 
             cv2.putText(img, idle, (obj.x, obj.y - 6), _font, 0.35, (0, 0, 0), 2)
             cv2.putText(img, idle, (obj.x, obj.y - 6), _font, 0.35, (200, 200, 200), 1)
@@ -714,7 +897,10 @@ def process(photo):
             text_offset_x = xmin
             text_offset_y = ymin - 5
 
-            cv2.circle(img, point, 1, (255, 255, 0), 2)
+            if military_mode and (class_name == "person" or class_name == "car"):
+                cv2.rectangle(img, (xmin, ymin), (xmax, ymax), (0, 0, 255), 1)
+            else:
+                cv2.circle(img, point, 1, (255, 255, 0), 2)
             cv2.putText(
                 img,
                 text,
@@ -739,6 +925,11 @@ def process(photo):
             bounding_boxes.append(item)
 
     if zoom_factor > 1.0:
+        add(c)
+        return img
+    
+    # Skip object tracking operations when in zoom mode
+    if zoom_mode_active:
         add(c)
         return img
 
@@ -779,7 +970,7 @@ def process(photo):
             else:
                 sid = obj.name + "#" + str(obj.nr)
 
-            idle = str(obj.idle) + "s"
+            idle = format_duration(obj.idle)
 
             cv2.circle(img, (obj.x, obj.y), 1, (0, 255, 255), 2)
 
@@ -815,9 +1006,26 @@ while loop:
         elif key == ord("s"):
             take_snapshot(img)
             q.queue.clear()
+        elif key == ord("f"):
+            reset_window_to_stream_resolution()
+            q.queue.clear()
+        elif key == ord("m"):
+            military_mode = not military_mode
+            print(f"Military mode: {'ON' if military_mode else 'OFF'}")
+            yolo_skip_frames = 1 if military_mode else 3
+            q.queue.clear()
 
         start = time.perf_counter_ns()
-        img = process(img)
+        
+        # Use basic stream processing until YOLO is loaded, then auto-switch
+        if basic_stream_mode:
+            img = process_basic_stream(img)
+            # Automatically switch to YOLO processing when model is loaded
+            if yolo_loading_complete:
+                basic_stream_mode = False
+                print("Switching to YOLO processing mode!")
+        else:
+            img = process(img)
 
         object_count = average()
         if object_count != old_count:
@@ -846,6 +1054,7 @@ while loop:
             cv2.putText(img, "REC", (16, img.shape[0] - 38), _font, 0.5, (0, 0, 255), 1)
 
         bb = str(len(bounding_boxes))
+
         cv2.putText(
             img, "Tracking: " + bb, (16, img.shape[0] - 26), _font, 0.4, (0, 0, 0), 2
         )
