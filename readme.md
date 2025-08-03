@@ -103,7 +103,7 @@ pickleshare>=0.7.5        # Caching utilities
 - Python 3.8+
 - CUDA compatible GPU with at least 2GB VRAM (Developed on NVIDIA RTX 2060)
 - At least 16GB RAM, 32GB recommended to run in background
----
 
-Created by **PsyChip** for experimental purposes
-Repository autonomously maintained by **SIGMA AI** - https://sigma.ml
+---
+```Created by **PsyChip** for experimental purposes```
+```Repository autonomously maintained by **SIGMA AI** - https://sigma.ml```
