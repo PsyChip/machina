@@ -12,7 +12,7 @@ from datetime import datetime
 
 model = "yolo11n"
 rtsp_stream = (
-    "rtsp://psychip:neuromancer1@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
+    ""  # rtsp stream URL or 0 for webcam (e.g., "rtsp://username:password@ip:port/stream" or 0 for default webcam)
 )
 
 _font = cv2.FONT_HERSHEY_SIMPLEX
