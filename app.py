@@ -10,19 +10,40 @@ from datetime import datetime
 
 # Heavy imports will be loaded in background
 
-model = "yolo11n"
+# ============================================
+# USER CONFIGURABLE VARIABLES
+# ============================================
+
+# YOLO Model and Stream Settings
+model = "yolo12n"  # YOLO model to use (yolo11n, yolo12n, yolo12s, etc.)
 rtsp_stream = (
-    ""  # rtsp stream URL or 0 for webcam (e.g., "rtsp://username:password@ip:port/stream" or 0 for default webcam)
+    "rtsp://<your-camera-ip-here>"  # rtsp stream URL or 0 for webcam
 )
 
-_font = cv2.FONT_HERSHEY_SIMPLEX
-point_timeout = 2500
-stationary_val = 16
+# Processing and Performance Settings  
+yolo_skip_frames = 2  # Process every Nth frame (2 = every 2nd frame)
+buffer = 512  # Frame buffer size
+min_confidence = 0.15  # Minimum confidence threshold for detections
+min_size = 20  # Minimum size for car detections
 
-buffer = 512
-idle_reset = 3000
-min_confidence = 0.15
-min_size = 20
+# Object Tracking Settings
+point_timeout = 2500  # Time before objects are considered lost (ms)
+stationary_val = 16  # Movement threshold for stationary objects
+idle_reset = 3000  # Time before frame skip reset (ms)
+obj_max = 16  # Maximum number of tracked objects
+padding = 6  # Padding around detected objects for cropping
+
+# Display Settings
+opsize = (640, 480)  # Default processing/display resolution
+yolo_input_size = 640  # Square size divisible by 32 for YOLO input
+snapshot_directory = "snapshots"  # Directory for snapshots
+_font = cv2.FONT_HERSHEY_SIMPLEX  # Font for text overlay
+
+# Replay and UI Settings
+replay_buffer_max_size = 300  # ~10 seconds at 30fps
+resolution_display_duration = 2000  # Resolution display time (ms)
+
+# Object Detection Confidence Thresholds
 class_confidence = {
     "truck": 0.35,
     "car": 0.15,
@@ -60,37 +81,38 @@ classlist = [
     "handbag",
 ]
 
-snapshot_directory = "snapshots"
+# ============================================
+# SYSTEM VARIABLES (DO NOT MODIFY)
+# ============================================
 
+# Stream and processing state
 frames = 0
 prev_frames = 0
 last_frame = 0
 fps = 0
 recording = False
 out = None
-
-opsize = (640, 480)
 streamsize = (0, 0)
+original_opsize = None  # Will store the original stream size for Ctrl+4
 
+# Zoom and pan state
 zoom_factor = 1.0
 pan_x = 0
 pan_y = 0
 zoom_mode_active = False
 stored_bounding_boxes = []
 
+# UI state variables
 hdstream = False
 drawing = False
 dragging = False
 drag_start_x = 0
 drag_start_y = 0
-military_mode = False
-
 draw_start_x = 0
 draw_start_y = 0
 draw_end_x = 0
 draw_end_y = 0
-
-padding = 6
+military_mode = False
 
 
 def transform(xmin, ymin, xmax, ymax, pad):
@@ -207,6 +229,33 @@ def reset_window_to_stream_resolution():
     print(f"Reset window to {reset_size[0]}x{reset_size[1]}")
 
 
+def resize_stream_dimensions(new_size):
+    """Resize stream processing dimensions and OpenCV window"""
+    global opsize, window, original_window_size, yolo_input_size, fullscreen
+    global resolution_display_active, resolution_display_text, resolution_display_start_time
+    
+    opsize = new_size
+    
+    # Adjust YOLO input size to be the larger dimension, rounded up to nearest 32
+    max_dim = max(opsize[0], opsize[1])
+    yolo_input_size = ((max_dim + 31) // 32) * 32  # Round up to nearest multiple of 32
+    
+    # If currently in fullscreen, maintain fullscreen after resize
+    if fullscreen:
+        cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    else:
+        cv2.resizeWindow(window, opsize[0], opsize[1])
+    
+    original_window_size = opsize
+    
+    # Activate resolution display
+    resolution_display_active = True
+    resolution_display_text = f"{opsize[0]}x{opsize[1]}"
+    resolution_display_start_time = millis()
+    
+    print(f"Resized stream to {opsize[0]}x{opsize[1]}, YOLO input: {yolo_input_size}x{yolo_input_size}")
+
+
 def timestamp():
     return int(time.time())
 
@@ -227,15 +276,15 @@ obj_score = labels
 bounding_boxes = []
 obj_number = 1
 
+# YOLO processing state
 yolo_frame_count = 0
-yolo_skip_frames = 3
 cached_yolo_results = None
 zoom_pan_active = False
 zoom_pan_pause_time = 0
+last_yolo_processing_duration = 0  # Store last YOLO processing time
 
 # Replay system variables
 replay_buffer = []
-replay_buffer_max_size = 300  # ~10 seconds at 30fps
 replay_mode = False
 replay_index = 0
 replay_last_flash_time = 0
@@ -244,8 +293,11 @@ replay_last_flash_time = 0
 fullscreen = False
 window_aspect_ratio = 4 / 3  # Default aspect ratio
 original_window_size = (640, 480)
-last_click_time = 0
-double_click_threshold = 300  # milliseconds
+
+# Resolution display variables
+resolution_display_active = False
+resolution_display_text = ""
+resolution_display_start_time = 0
 
 
 def center(xmin, ymin, xmax, ymax):
@@ -259,7 +311,7 @@ def _size(x1, y1, x2, y2):
 
 
 def mouse_callback(event, x, y, flags, param):
-    global drawing, draw_start_x, draw_start_y, draw_end_x, draw_end_y, dragging, drag_start_x, drag_start_y, zoom_factor, pan_x, pan_y, zoom_pan_active, zoom_pan_pause_time, cached_yolo_results, zoom_mode_active, stored_bounding_boxes, bounding_boxes, fullscreen, last_click_time, double_click_threshold, window
+    global drawing, draw_start_x, draw_start_y, draw_end_x, draw_end_y, dragging, drag_start_x, drag_start_y, zoom_factor, pan_x, pan_y, zoom_pan_active, zoom_pan_pause_time, cached_yolo_results, zoom_mode_active, stored_bounding_boxes, bounding_boxes, fullscreen, window
     if event == cv2.EVENT_RBUTTONDOWN:
         dragging = True
         zoom_pan_active = True
@@ -281,19 +333,12 @@ def mouse_callback(event, x, y, flags, param):
         draw_start_y = 0
 
     if event == cv2.EVENT_LBUTTONDOWN:
-        # Check for double-click
-        current_time = millis()
-        if current_time - last_click_time < double_click_threshold:
-            # Double-click detected - toggle fullscreen
-            toggle_fullscreen()
-        else:
-            # Single click - start drawing
-            drawing = True
-            draw_end_x = 0
-            draw_end_y = 0
-            draw_start_x = x
-            draw_start_y = y
-        last_click_time = current_time
+        # Start drawing
+        drawing = True
+        draw_end_x = 0
+        draw_end_y = 0
+        draw_start_x = x
+        draw_start_y = y
 
     if event == cv2.EVENT_MOUSEWHEEL:
         zoom_pan_active = True
@@ -444,7 +489,7 @@ def start_recording(cap):
         filename = f"recordings/recording_{timestamp}.mp4"
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(filename, fourcc, 20, (640, 480))
+        out = cv2.VideoWriter(filename, fourcc, 20, opsize)
 
         recording = True
         print(f"Started recording: {filename}")
@@ -546,11 +591,13 @@ streamsize = (
     int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
 )
 
-# Calculate aspect ratio from stream
+# Store original stream size for Ctrl+4 functionality  
 if streamsize[0] > 0 and streamsize[1] > 0:
+    original_opsize = streamsize  # Store original stream dimensions
     window_aspect_ratio = streamsize[0] / streamsize[1]
     original_window_size = streamsize
 else:
+    original_opsize = opsize  # Fallback to default size
     window_aspect_ratio = opsize[0] / opsize[1]
     original_window_size = opsize
 
@@ -796,15 +843,22 @@ def process(photo):
         zoom_pan_active = False
         cached_yolo_results = None  # Clear cache when zoom/pan timeout ends
 
-    # Skip YOLO inference during zoom/pan operations
-    if zoom_pan_active or dragging:
-        # Use last cached results during zoom/pan
+    # Skip YOLO inference during zoom/pan operations or when zoomed in
+    if zoom_pan_active or dragging or zoom_factor > 1.0:
+        # Use last cached results during zoom/pan or when zoomed
         results = cached_yolo_results
     else:
         # Run YOLO inference only every 3rd frame when not zooming/panning
         if yolo_frame_count % yolo_skip_frames == 0:
+            # Start timing YOLO processing
+            global last_yolo_processing_duration
+            yolo_start = time.perf_counter_ns()
+            
+            # Create square input for YOLO (required to be divisible by 32)
+            yolo_img = cv2.resize(img, (yolo_input_size, yolo_input_size), interpolation=cv2.INTER_LINEAR)
+            
             img_tensor = (
-                torch.from_numpy(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                torch.from_numpy(cv2.cvtColor(yolo_img, cv2.COLOR_BGR2RGB))
                 .to(device)
                 .float()
                 / 255.0
@@ -821,6 +875,9 @@ def process(photo):
                     conf=min_confidence,
                     classes=classlist,
                 )
+            
+            # Store YOLO processing duration
+            last_yolo_processing_duration = time.perf_counter_ns() - yolo_start
 
             # Cache the results for next 2 frames
             cached_yolo_results = results
@@ -857,6 +914,14 @@ def process(photo):
 
         xmin, ymin, xmax, ymax = box.xyxy[0]
         xmin, ymin, xmax, ymax = map(int, [xmin, ymin, xmax, ymax])
+        
+        # Transform coordinates from YOLO square input back to display dimensions
+        scale_x = opsize[0] / yolo_input_size
+        scale_y = opsize[1] / yolo_input_size
+        xmin = int(xmin * scale_x)
+        ymin = int(ymin * scale_y)
+        xmax = int(xmax * scale_x)
+        ymax = int(ymax * scale_y)
         width = xmax - xmin
         height = ymax - ymin
 
@@ -1081,12 +1146,39 @@ while loop:
         elif key == ord("m"):
             military_mode = not military_mode
             print(f"Military mode: {'ON' if military_mode else 'OFF'}")
-            yolo_skip_frames = 1 if military_mode else 3
+            yolo_skip_frames = 1 if military_mode else 2
             q.queue.clear()
+        
+        # Handle Ctrl+number combinations for resizing
+        elif key == ord("1") or key == 49:  # Ctrl+1: 640x480
+            resize_stream_dimensions((640, 480))
+            q.queue.clear()
+        elif key == ord("2") or key == 50:  # Ctrl+2: 800x600  
+            resize_stream_dimensions((800, 600))
+            q.queue.clear()
+        elif key == ord("3") or key == 51:  # Ctrl+3: 1024x768
+            resize_stream_dimensions((1024, 768))
+            q.queue.clear()
+        elif key == ord("4") or key == 52:  # Ctrl+4: 1280x800
+            resize_stream_dimensions((1280, 800))
+            q.queue.clear()
+        elif key == ord("5") or key == 53:  # Ctrl+5: 1920x1080
+            resize_stream_dimensions((1920, 1080))
+            q.queue.clear()
+        elif key == ord("6") or key == 54:  # Ctrl+6: original stream size
+            if original_opsize:
+                resize_stream_dimensions(original_opsize)
+                q.queue.clear()
+        elif key == 13:  # Enter key - toggle fullscreen
+            toggle_fullscreen()
+            q.queue.clear()
+        elif key == 27:  # Esc key - exit fullscreen only
+            if fullscreen:
+                toggle_fullscreen()  # Exit fullscreen
+            q.queue.clear()
+        
         if key < 255 and key > 0:
             print(f"Key pressed: {key}")
-
-        start = time.perf_counter_ns()
 
         # Skip YOLO processing during replay mode
         if replay_mode:
@@ -1108,7 +1200,7 @@ while loop:
                     basic_stream_mode = False
                     print("Switching to YOLO processing mode!")
             else:
-                img = process(img)
+                img = process(img)  # YOLO timing is handled inside this function
 
         # Skip object count and FPS calculations during replay mode
         if not replay_mode:
@@ -1126,12 +1218,10 @@ while loop:
                 prev_frames = frames
                 last_frame = millis()
 
-        duration = time.perf_counter_ns() - start
-
         if replay_mode:
-            _fps = "REPLAY MODE - LAG: " + str(duration // 1000000) + "ms"
+            _fps = "REPLAY MODE - LAG: 0ms"
         else:
-            _fps = "FPS: " + str(fps) + " - LAG: " + str(duration // 1000000) + "ms"
+            _fps = "FPS: " + str(fps) + " - LAG: " + str(last_yolo_processing_duration // 1000000) + "ms"
 
         text_y = img.shape[0] - 5
         cv2.putText(img, _fps, (16, text_y), _font, 0.4, (0, 0, 0), 2)
@@ -1191,6 +1281,20 @@ while loop:
             cv2.putText(img, clock, (text_x, text_y), _font, 0.4, (255, 255, 255), 1)
 
         if drawing and draw_start_x > 0 and draw_end_x > 0:
+            # Create semi-transparent green rectangle overlay
+            overlay = img.copy()
+            cv2.rectangle(
+                overlay,
+                (draw_start_x, draw_start_y),
+                (draw_end_x, draw_end_y),
+                (0, 255, 0),
+                thickness=-1,  # Fill the rectangle
+            )
+            # Apply transparency
+            alpha = 0.3  # 30% transparency
+            cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+            
+            # Draw thick border
             cv2.rectangle(
                 img,
                 (draw_start_x, draw_start_y),
@@ -1198,6 +1302,24 @@ while loop:
                 (0, 255, 0),
                 thickness=2,
             )
+
+        # Display resolution temporarily when changed
+        if resolution_display_active:
+            current_time = millis()
+            if current_time - resolution_display_start_time < resolution_display_duration:
+                # Draw resolution text in big yellow font at top left
+                font_scale = 0.85
+                thickness = 2
+                color = (0, 200, 200)  # Yellow in BGR
+                position = (16, 32)  # Top left corner with some padding
+                
+                # Draw black outline for better visibility
+                cv2.putText(img, resolution_display_text, position, _font, font_scale, (16, 16, 16), thickness + 3)
+                # Draw yellow text
+                cv2.putText(img, resolution_display_text, position, _font, font_scale, color, thickness)
+            else:
+                # Timer expired, disable display
+                resolution_display_active = False
 
         cv2.imshow(str(rtsp_stream), img)
     else:

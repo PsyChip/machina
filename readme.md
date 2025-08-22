@@ -12,9 +12,12 @@ Machina watches video feeds and automatically detects objects like people, cars,
 - Runs completely offline - no internet required
 - Records video and takes snapshots with one key press
 - Real-time object detection and tracking
-- Zoom and pan controls
-- Crowd detection
-- Instant replay
+- Zoom and pan controls with smart object tracking
+- Crowd detection and clustering
+- Instant replay system with 10-second buffer
+- Multiple resolution presets and fullscreen support
+- Military mode for enhanced detection
+- Smart frame skipping and performance optimization
 
 ## Quick Start
 
@@ -52,10 +55,18 @@ Edit the top of `app.py` to change your video source:
 | `Q` | Quit |
 | `R` | Start/Stop recording |
 | `S` | Take screenshot |
-| `F` | Reset zoom |
-| `M` | High performance mode |
+| `F` | Reset window to stream resolution |
+| `M` | Toggle military mode (enhanced detection) |
 | `Space` | Skip frames |
-| `Backspace` | Replay mode |
+| `Backspace` | Toggle replay mode |
+| `1` | Resize to 640x480 |
+| `2` | Resize to 800x600 |
+| `3` | Resize to 1024x768 |
+| `4` | Resize to 1280x800 |
+| `5` | Resize to 1920x1080 |
+| `6` | Reset to original stream size |
+| `Enter` | Toggle fullscreen mode |
+| `Esc` | Exit fullscreen mode |
 
 **Mouse Controls:**
 - **Scroll wheel:** Zoom in/out
@@ -75,8 +86,9 @@ You can change what it looks for by editing the `classlist` in `app.py`.
 ## Troubleshooting
 
 **Program runs slowly?**
-- Try pressing `M` for high-performance mode
+- Try pressing `M` to enable military mode for optimized processing
 - Make sure you have a graphics card and installed the CUDA version above
+- Use number keys (1-6) to adjust resolution for better performance
 
 **Can't connect to camera?**
 - Check your camera URL or make sure webcam is plugged in
@@ -97,6 +109,32 @@ numpy                     # Numerical computations
 dill>=0.3.9               # Object serialization
 pickleshare>=0.7.5        # Caching utilities
 ```
+
+## Advanced Features
+
+### Zoom and Pan System
+- Scroll wheel to zoom in/out (up to 6x zoom)
+- Right-click and drag to pan around when zoomed
+- Smart object tracking preservation during zoom operations
+- Automatic YOLO processing optimization during zoom
+
+### Military Mode
+- Enhanced detection mode with grayscale processing
+- Optimized for person and vehicle detection
+- Reduced frame skipping for maximum accuracy
+- Toggle with `M` key
+
+### Replay System
+- Automatic 10-second rolling buffer (~300 frames at 30fps)
+- Instant replay with `Backspace` key
+- Visual "REPLAY" indicator during playback
+- No YOLO processing during replay for smooth playback
+
+### Resolution Management
+- Multiple preset resolutions (640x480 to 1920x1080)
+- Dynamic YOLO input size adjustment
+- Fullscreen support with aspect ratio preservation
+- Original stream size restoration
 
 ## System Requirements
 

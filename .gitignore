@@ -12,6 +12,7 @@ models
 models/*
 captions
 captions/*
+.claude
 db/*.pkl
 db/*.faiss
 __pycache__
