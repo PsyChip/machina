@@ -6,6 +6,7 @@ import cv2
 import queue
 import threading
 import sys
+import json
 from datetime import datetime
 
 # Heavy imports will be loaded in background
@@ -16,9 +17,7 @@ from datetime import datetime
 
 # YOLO Model and Stream Settings
 model = "yolo12n"  # YOLO model to use (yolo11n, yolo12n, yolo12s, etc.)
-rtsp_stream = (
-    "rtsp://<your-camera-ip-here>"  # rtsp stream URL or 0 for webcam
-)
+rtsp_stream = 0  # Use 0 for default webcam
 
 # Processing and Performance Settings  
 yolo_skip_frames = 2  # Process every Nth frame (2 = every 2nd frame)
@@ -113,6 +112,14 @@ draw_start_y = 0
 draw_end_x = 0
 draw_end_y = 0
 military_mode = False
+show_info_overlay = False
+show_help_text = False
+help_text_start_time = 0
+show_frame_skip_display = False
+frame_skip_display_start_time = 0
+yolo_first_processing_started = False
+is_first_run = False
+webcam_max_resolution = None  # Store webcam's maximum supported resolution
 
 
 def transform(xmin, ymin, xmax, ymax, pad):
@@ -231,10 +238,27 @@ def reset_window_to_stream_resolution():
 
 def resize_stream_dimensions(new_size):
     """Resize stream processing dimensions and OpenCV window"""
-    global opsize, window, original_window_size, yolo_input_size, fullscreen
+    global opsize, window, original_window_size, yolo_input_size, fullscreen, cap, rtsp_stream
     global resolution_display_active, resolution_display_text, resolution_display_start_time
     
     opsize = new_size
+    
+    # If using webcam, check against maximum supported resolution
+    if rtsp_stream == 0 and cap and webcam_max_resolution:
+        if opsize[0] <= webcam_max_resolution[0] and opsize[1] <= webcam_max_resolution[1]:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, opsize[0])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, opsize[1])
+            print(f"Set webcam resolution to {opsize[0]}x{opsize[1]}")
+            
+            # Verify what resolution was actually set
+            actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if (actual_width, actual_height) != opsize:
+                print(f"Warning: Webcam set to {actual_width}x{actual_height}, not {opsize[0]}x{opsize[1]}")
+        else:
+            print(f"Cannot set {opsize[0]}x{opsize[1]} - webcam max is {webcam_max_resolution[0]}x{webcam_max_resolution[1]}")
+            # Don't change the resolution if it exceeds webcam capability
+            return
     
     # Adjust YOLO input size to be the larger dimension, rounded up to nearest 32
     max_dim = max(opsize[0], opsize[1])
@@ -258,6 +282,282 @@ def resize_stream_dimensions(new_size):
 
 def timestamp():
     return int(time.time())
+
+
+def detect_webcam_max_resolution(cap):
+    """Detect the maximum resolution supported by the webcam"""
+    global webcam_max_resolution
+    
+    # Common resolutions to test (from highest to lowest)
+    test_resolutions = [
+        (1920, 1080),  # 1080p
+        (1600, 1200),  # UXGA
+        (1280, 1024),  # SXGA
+        (1280, 768),   # User mentioned this works
+        (1280, 720),   # 720p
+        (1024, 768),   # XGA
+        (800, 600),    # SVGA
+        (640, 480)     # VGA
+    ]
+    
+    max_width = 0
+    max_height = 0
+    
+    for width, height in test_resolutions:
+        # Try to set resolution
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        
+        # Check what was actually set
+        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # If we got the requested resolution, this is supported
+        if actual_width >= width * 0.9 and actual_height >= height * 0.9:  # Allow 10% tolerance
+            if actual_width * actual_height > max_width * max_height:
+                max_width = actual_width
+                max_height = actual_height
+    
+    webcam_max_resolution = (max_width, max_height)
+    print(f"Webcam maximum resolution detected: {max_width}x{max_height}")
+    return webcam_max_resolution
+
+
+def get_available_resolutions():
+    """Get available resolutions based on current stream type"""
+    global webcam_max_resolution, rtsp_stream
+    
+    # Define resolution presets
+    all_resolutions = [
+        (640, 480),
+        (800, 600), 
+        (1024, 768),
+        (1280, 800),
+        (1920, 1080)
+    ]
+    
+    if rtsp_stream == 0 and webcam_max_resolution:
+        # Filter resolutions that fit within webcam capability
+        available = []
+        for res in all_resolutions:
+            if res[0] <= webcam_max_resolution[0] and res[1] <= webcam_max_resolution[1]:
+                available.append(res)
+        return available if available else [webcam_max_resolution]
+    else:
+        # For RTSP streams, all resolutions are available (will be scaled)
+        return all_resolutions
+
+
+def cycle_resolution(direction):
+    """Cycle through available resolution presets with + and - keys"""
+    global opsize
+    
+    available_resolutions = get_available_resolutions()
+    
+    # Find current resolution in available list
+    try:
+        current_index = available_resolutions.index(opsize)
+    except ValueError:
+        # Current resolution not in list, start from first
+        current_index = 0
+    
+    if direction > 0:  # + key - increase resolution
+        current_index = (current_index + 1) % len(available_resolutions)
+    else:  # - key - decrease resolution
+        current_index = (current_index - 1) % len(available_resolutions)
+    
+    new_resolution = available_resolutions[current_index]
+    
+    # Show available resolutions for debugging
+    if rtsp_stream == 0:
+        print(f"Available webcam resolutions: {available_resolutions}")
+    
+    resize_stream_dimensions(new_resolution)
+    print(f"Resolution cycled to: {new_resolution[0]}x{new_resolution[1]}")
+
+
+def load_config():
+    """Load configuration from config.json, create if doesn't exist"""
+    global yolo_skip_frames, opsize, show_info_overlay, is_first_run
+    
+    config_file = "config.json"
+    default_config = {
+        "processing_nth_frame": 2,
+        "screen_resolution": [640, 480],
+        "window_position": [100, 100],
+        "first_run": True
+    }
+    
+    try:
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+                yolo_skip_frames = config.get("processing_nth_frame", 2)
+                opsize = tuple(config.get("screen_resolution", [640, 480]))
+                window_pos = config.get("window_position", [100, 100])
+                is_first_run = config.get("first_run", False)
+                print(f"Config loaded: skip={yolo_skip_frames}, resolution={opsize}, pos={window_pos}")
+                return window_pos
+        else:
+            # First run - create config file
+            with open(config_file, 'w') as f:
+                json.dump(default_config, f, indent=2)
+            is_first_run = True
+            print("First run detected - created config.json")
+            return default_config["window_position"]
+    except Exception as e:
+        print(f"Error loading config: {e}")
+        is_first_run = True
+        return default_config["window_position"]
+
+
+def save_config():
+    """Save current configuration to config.json"""
+    global yolo_skip_frames, opsize, window
+    
+    config_file = "config.json"
+    
+    try:
+        # Get current window position (if possible)
+        window_pos = [100, 100]  # Default fallback
+        try:
+            # OpenCV doesn't provide direct way to get window position
+            # We'll use the stored values or defaults
+            pass
+        except:
+            pass
+        
+        config = {
+            "processing_nth_frame": yolo_skip_frames,
+            "screen_resolution": list(opsize),
+            "window_position": window_pos,
+            "first_run": False
+        }
+        
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=2)
+        print(f"Configuration saved: skip={yolo_skip_frames}, resolution={opsize}")
+    except Exception as e:
+        print(f"Error saving config: {e}")
+
+
+def get_gpu_info():
+    """Get GPU name and VRAM info"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory
+            gpu_vram_gb = round(gpu_memory / 1024**3, 1)
+            return gpu_name, f"{gpu_vram_gb}GB"
+        else:
+            return "No CUDA GPU", "N/A"
+    except:
+        return "Unknown GPU", "N/A"
+
+
+def get_app_modified_time():
+    """Get last modified time of the running script with relative time"""
+    try:
+        # Get the actual script filename that's being executed
+        script_path = os.path.abspath(sys.argv[0])
+        script_name = os.path.basename(script_path)
+        
+        modified_time = os.path.getmtime(script_path)
+        modified_datetime = datetime.fromtimestamp(modified_time)
+        current_datetime = datetime.now()
+        
+        # Calculate days difference
+        time_diff = current_datetime - modified_datetime
+        days_ago = time_diff.days
+        
+        # Format the date (handle both Linux and Windows formats)
+        try:
+            formatted_date = modified_datetime.strftime("%-d %b %Y")  # Linux format
+        except:
+            formatted_date = modified_datetime.strftime("%#d %b %Y")  # Windows format
+        
+        if days_ago == 0:
+            relative_time = "today"
+        elif days_ago == 1:
+            relative_time = "1 day ago"
+        else:
+            relative_time = f"{days_ago} days ago"
+        
+        return f"{script_name}: {formatted_date} ({relative_time})"
+    except:
+        return "Script: Unknown"
+
+
+def draw_info_overlay(img):
+    """Draw the MACHINA info overlay with reduced brightness"""
+    overlay = img.copy()
+    
+    # Reduce brightness by 50%
+    overlay = cv2.convertScaleAbs(overlay, alpha=0.5, beta=0)
+    
+    height, width = img.shape[:2]
+    
+    # Draw MACHINA title at top
+    title = "MACHINA"
+    title_font_scale = 2.0
+    title_thickness = 3
+    title_size = cv2.getTextSize(title, _font, title_font_scale, title_thickness)[0]
+    title_x = (width - title_size[0]) // 2
+    title_y = 60
+    
+    # Draw title with shadow
+    cv2.putText(overlay, title, (title_x + 2, title_y + 2), _font, title_font_scale, (0, 0, 0), title_thickness + 2)
+    cv2.putText(overlay, title, (title_x, title_y), _font, title_font_scale, (255, 255, 255), title_thickness)
+    
+    # Draw separator line
+    line_y = title_y + 20
+    line_start_x = width // 4
+    line_end_x = 3 * width // 4
+    cv2.line(overlay, (line_start_x, line_y), (line_end_x, line_y), (255, 255, 255), 2)
+    
+    # Keyboard commands list
+    commands = [
+        "SPACE - Frame skip",
+        "Q - Quit",
+        "R - Toggle recording",
+        "S - Take snapshot", 
+        "F - Reset window size",
+        "M - Toggle military mode",
+        "ENTER - Toggle fullscreen",
+        "ESC - Exit fullscreen",
+        "TAB - Toggle this info",
+        "BACKSPACE - Toggle replay mode",
+        "1-6 - Change resolution",
+        "+ / - - Adjust processing speed",
+        "Mouse wheel - Zoom",
+        "Right click drag - Pan",
+        "Left click drag - Draw rectangle"
+    ]
+    
+    # Draw commands
+    cmd_y = line_y + 40
+    cmd_font_scale = 0.6
+    cmd_thickness = 1
+    line_height = 25
+    
+    for i, cmd in enumerate(commands):
+        y_pos = cmd_y + (i * line_height)
+        if y_pos > height - 100:  # Don't go too far down
+            break
+        cv2.putText(overlay, cmd, (50, y_pos), _font, cmd_font_scale, (255, 255, 255), cmd_thickness)
+    
+    # Get system info
+    gpu_name, gpu_vram = get_gpu_info()
+    app_modified = get_app_modified_time()
+    
+    # Draw system info at bottom
+    info_y = height - 60
+    cv2.putText(overlay, f"GPU: {gpu_name}", (20, info_y), _font, 0.5, (0, 255, 255), 1)  # Yellow
+    cv2.putText(overlay, f"VRAM: {gpu_vram}", (20, info_y + 20), _font, 0.5, (0, 0, 255), 1)  # Red
+    cv2.putText(overlay, app_modified, (20, info_y + 40), _font, 0.4, (255, 255, 255), 1)
+    
+    return overlay
 
 
 labels = open("db/coco.names").read().strip().split("\n")
@@ -574,13 +874,31 @@ device = None
 
 print(f"Starting up..")
 
+# Load configuration
+window_position = load_config()
+print(f"First run status: {is_first_run}")
+
 # Initialize stream immediately
 loop = True
 cap = cv2.VideoCapture(rtsp_stream)
 
 if rtsp_stream == 0:
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    # Detect webcam maximum supported resolution
+    max_res = detect_webcam_max_resolution(cap)
+    
+    # Set to maximum supported resolution
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, max_res[0])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, max_res[1])
+    
+    # Verify final setting
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"Webcam initialized at {actual_width}x{actual_height}")
+    
+    # Update opsize to match webcam capability if needed
+    if max_res[0] < opsize[0] or max_res[1] < opsize[1]:
+        print(f"Adjusting display size to webcam capability: {max_res[0]}x{max_res[1]}")
+        opsize = max_res
 
 fps = cap.get(cv2.CAP_PROP_FPS)
 ret, img = cap.read()
@@ -661,6 +979,13 @@ def load_yolo_and_components():
     model = yolo_model
     yolo_model_loaded = True
     yolo_loading_complete = True
+    
+    # Check if first run and show help immediately after YOLO loads
+    global is_first_run, show_info_overlay
+    if is_first_run:
+        show_info_overlay = True
+        print("First run detected - help overlay will be shown")
+    
     print("YOLO model loaded successfully! Switching to full processing mode.")
 
 
@@ -848,8 +1173,31 @@ def process(photo):
         # Use last cached results during zoom/pan or when zoomed
         results = cached_yolo_results
     else:
-        # Run YOLO inference only every 3rd frame when not zooming/panning
-        if yolo_frame_count % yolo_skip_frames == 0:
+        # Run YOLO inference based on skip setting (0 = all frames, >0 = every nth frame)
+        if yolo_skip_frames == 0 or yolo_frame_count % (yolo_skip_frames + 1) == 0:
+            # Trigger help text on first YOLO processing
+            global yolo_first_processing_started, show_help_text, help_text_start_time, is_first_run, show_info_overlay
+            if not yolo_first_processing_started:
+                yolo_first_processing_started = True
+                
+                if is_first_run:
+                    # First run - show help screen immediately
+                    show_info_overlay = True
+                    print("First run detected - showing help overlay")
+                else:
+                    # Regular run - show help text 2 seconds after first YOLO processing
+                    import threading
+                    def delayed_help_text():
+                        import time
+                        time.sleep(2)
+                        global show_help_text, help_text_start_time
+                        show_help_text = True
+                        help_text_start_time = millis()
+                    
+                    help_thread = threading.Thread(target=delayed_help_text)
+                    help_thread.daemon = True
+                    help_thread.start()
+            
             # Start timing YOLO processing
             global last_yolo_processing_duration
             yolo_start = time.perf_counter_ns()
@@ -1118,6 +1466,8 @@ while loop:
             q.queue.clear()
 
         if key == ord("q"):
+            print("Saving configuration...")
+            save_config()
             loop = False
         elif key == 8:
             if not replay_mode and len(replay_buffer) > 0:
@@ -1176,6 +1526,21 @@ while loop:
             if fullscreen:
                 toggle_fullscreen()  # Exit fullscreen
             q.queue.clear()
+        elif key == ord("+") or key == ord("="):  # + key (increase resolution)
+            cycle_resolution(1)
+            q.queue.clear()
+        elif key == ord("-"):  # - key (decrease resolution)
+            cycle_resolution(-1)
+            q.queue.clear()
+        
+        elif key == 9:  # Tab key - toggle info overlay
+            # On first run, any tab press marks first run as complete
+            if is_first_run:
+                is_first_run = False
+                print("First run completed - normal tab behavior enabled")
+            
+            show_info_overlay = not show_info_overlay
+            print(f"Info overlay: {'ON' if show_info_overlay else 'OFF'}")
         
         if key < 255 and key > 0:
             print(f"Key pressed: {key}")
@@ -1320,6 +1685,38 @@ while loop:
             else:
                 # Timer expired, disable display
                 resolution_display_active = False
+
+        # Show help text for 2 seconds after YOLO processing starts
+        if show_help_text:
+            current_time = millis()
+            if current_time - help_text_start_time < 2000:  # Show for 2 seconds
+                help_text = "press tab for help"
+                cv2.putText(img, help_text, (16, 50), _font, 0.4, (0, 255, 255), 1)  # Small yellow text, no outline
+            else:
+                show_help_text = False
+
+        # Show frame skip display for 2 seconds when changed
+        if show_frame_skip_display:
+            current_time = millis()
+            if current_time - frame_skip_display_start_time < 2000:  # Show for 2 seconds
+                if yolo_skip_frames == 0:
+                    skip_text = "Processing: ALL FRAMES"
+                else:
+                    skip_text = f"Processing: Every {yolo_skip_frames + 1} frames"
+                
+                # Position at top center
+                text_size = cv2.getTextSize(skip_text, _font, 0.7, 2)[0]
+                text_x = (img.shape[1] - text_size[0]) // 2
+                text_y = 40
+                
+                cv2.putText(img, skip_text, (text_x, text_y), _font, 0.7, (0, 0, 0), 4)  # Black outline
+                cv2.putText(img, skip_text, (text_x, text_y), _font, 0.7, (0, 255, 255), 2)  # Yellow text
+            else:
+                show_frame_skip_display = False
+
+        # Apply info overlay if enabled
+        if show_info_overlay:
+            img = draw_info_overlay(img)
 
         cv2.imshow(str(rtsp_stream), img)
     else:

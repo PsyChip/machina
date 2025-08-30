@@ -1,0 +1,12 @@
+{
+  "processing_nth_frame": 1,
+  "screen_resolution": [
+    1280,
+    800
+  ],
+  "window_position": [
+    100,
+    100
+  ],
+  "first_run": false
+}

@@ -1,6 +1,6 @@
 # Machina - Video Surveillance System
 
-A simple-to-use AI-powered video surveillance system that can detect and track objects in real-time from cameras.
+A simple-to-use AI-powered video surveillance system that can detect and track objects in real-time from cameras, featuring advanced zoom controls, multiple resolution presets, and smart frame optimization.
 
 ![Demo Screenshot](demo.png)
 
@@ -11,13 +11,16 @@ Machina watches video feeds and automatically detects objects like people, cars,
 **Key Features:**
 - Runs completely offline - no internet required
 - Records video and takes snapshots with one key press
-- Real-time object detection and tracking
-- Zoom and pan controls with smart object tracking
-- Crowd detection and clustering
-- Instant replay system with 10-second buffer
-- Multiple resolution presets and fullscreen support
-- Military mode for enhanced detection
+- Real-time object detection and tracking using YOLO models
+- Advanced zoom and pan controls with smart object tracking
+- Crowd detection and clustering algorithms
+- Instant replay system with 10-second rolling buffer
+- Multiple resolution presets (640x480 to 1920x1080) with keypad shortcuts
+- Fullscreen support with aspect ratio preservation
+- Military mode for enhanced detection accuracy
 - Smart frame skipping and performance optimization
+- Dynamic YOLO input size adjustment for optimal performance
+- Semi-transparent selection overlay with real-time drawing
 
 ## Quick Start
 
@@ -35,7 +38,13 @@ pip uninstall torch torchvision torchaudio
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
-4. **Run the program:**
+4. **Configure your settings:**
+Edit the top section of `app.py` to customize:
+- YOLO model (default: yolo12n)
+- Video source (RTSP URL or webcam)
+- Performance settings and thresholds
+
+5. **Run the program:**
 ```bash
 python app.py
 ```
@@ -143,5 +152,5 @@ pickleshare>=0.7.5        # Caching utilities
 - At least 16GB RAM, 32GB recommended to run in background
 
 ---
-```Created by **PsyChip** for experimental purposes```
-```Repository autonomously maintained by **SIGMA AI** - https://sigma.ml```
+- Curated by **PsyChip** for experimental purposes
+- Repository maintained by **SIGMA AI** - https://sigma.ml
