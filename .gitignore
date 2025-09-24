@@ -17,3 +17,5 @@ db/*.pkl
 db/*.faiss
 __pycache__
 __pycache__/*
+.bat
+*.bat

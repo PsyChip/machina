@@ -59,23 +59,23 @@ Edit the top of `app.py` to change your video source:
 
 ### Controls
 
-| Key | What it does |
-|-----|--------------|
-| `Q` | Quit |
-| `R` | Start/Stop recording |
-| `S` | Take screenshot |
-| `F` | Reset window to stream resolution |
-| `M` | Toggle military mode (enhanced detection) |
-| `Space` | Skip frames |
-| `Backspace` | Toggle replay mode |
-| `1` | Resize to 640x480 |
-| `2` | Resize to 800x600 |
-| `3` | Resize to 1024x768 |
-| `4` | Resize to 1280x800 |
-| `5` | Resize to 1920x1080 |
-| `6` | Reset to original stream size |
-| `Enter` | Toggle fullscreen mode |
-| `Esc` | Exit fullscreen mode |
+| Key         | What it does                              |
+| ----------- | ----------------------------------------- |
+| `Q`         | Quit                                      |
+| `R`         | Start/Stop recording                      |
+| `S`         | Take screenshot                           |
+| `F`         | Reset window to stream resolution         |
+| `M`         | Toggle military mode (enhanced detection) |
+| `Space`     | Skip frames                               |
+| `Backspace` | Toggle replay mode                        |
+| `1`         | Resize to 640x480                         |
+| `2`         | Resize to 800x600                         |
+| `3`         | Resize to 1024x768                        |
+| `4`         | Resize to 1280x800                        |
+| `5`         | Resize to 1920x1080                       |
+| `6`         | Reset to original stream size             |
+| `Enter`     | Toggle fullscreen mode                    |
+| `Esc`       | Exit fullscreen mode                      |
 
 **Mouse Controls:**
 - **Scroll wheel:** Zoom in/out

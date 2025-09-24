@@ -1,8 +1,8 @@
 {
-  "processing_nth_frame": 1,
+  "processing_nth_frame": 5,
   "screen_resolution": [
-    1280,
-    800
+    1024,
+    768
   ],
   "window_position": [
     100,

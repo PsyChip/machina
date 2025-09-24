@@ -1,0 +1,31 @@
+{
+  "MSMF_640x480_30fps": {
+    "fingerprint": {
+      "backend": "MSMF",
+      "default_width": 640,
+      "default_height": 480,
+      "fps": 30.0,
+      "brightness": 128.0,
+      "contrast": 32.0,
+      "saturation": 32.0,
+      "hue": -1.0
+    },
+    "max_width": 1920,
+    "max_height": 1080,
+    "tested_date": "2025-09-21T21:23:59.232656",
+    "resolutions_tested": [
+      [
+        1920,
+        1080
+      ],
+      [
+        1280,
+        720
+      ],
+      [
+        640,
+        480
+      ]
+    ]
+  }
+}
