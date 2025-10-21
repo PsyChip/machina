@@ -10,6 +10,7 @@ import json
 import math
 from datetime import datetime
 import argparse
+from collections import deque
 
 # Heavy imports will be loaded in background
 
@@ -41,6 +42,7 @@ yolo_skip_frames = 2  # Process every Nth frame (2 = every 2nd frame)
 buffer = 512  # Frame buffer size
 min_confidence = 0.15  # Minimum confidence threshold for detections
 min_size = 20  # Minimum size for car detections
+stream_timeout_ms = 5000  # Stream timeout detection threshold (5 seconds)
 
 # Object Tracking Settings
 point_timeout = 2500  # Time before objects are considered lost (ms)
@@ -111,6 +113,11 @@ out = None
 streamsize = (0, 0)
 original_opsize = None  # Will store the original stream size for Ctrl+4
 
+# Stream timeout detection variables
+last_frame_time = 0
+stream_timeout_threshold = stream_timeout_ms  # Use configurable timeout from settings
+max_consecutive_failures = 3  # Max consecutive read failures before restart
+
 # Zoom and pan state
 zoom_factor = 1.0
 pan_x = 0
@@ -137,6 +144,20 @@ frame_skip_display_start_time = 0
 yolo_first_processing_started = False
 is_first_run = False
 webcam_max_resolution = None  # Store webcam's maximum supported resolution
+
+# Audio visualization state
+audio_waveform = deque(maxlen=1024)
+audio_waveform_lock = threading.Lock()
+audio_visualization_enabled = False
+audio_playback_enabled = False
+audio_thread = None
+audio_muted = False
+AUDIO_WAVEFORM_HEIGHT = 60
+AUDIO_WAVEFORM_TARGET_POINTS = 1024
+AUDIO_WAVEFORM_SECONDS = 1.0
+audio_waveform_downsample = 1
+audio_waveform_max_points = 1024
+audio_waveform_sample_rate = 44100
 
 
 def transform(xmin, ymin, xmax, ymax, pad):
@@ -813,7 +834,7 @@ def _size(x1, y1, x2, y2):
 
 
 def mouse_callback(event, x, y, flags, param):
-    global drawing, draw_start_x, draw_start_y, draw_end_x, draw_end_y, dragging, drag_start_x, drag_start_y, zoom_factor, pan_x, pan_y, zoom_pan_active, zoom_pan_pause_time, cached_yolo_results, zoom_mode_active, stored_bounding_boxes, bounding_boxes, fullscreen, window, selection_complete, clipboard_message_active, clipboard_message_start_time, selection_start_x, selection_start_y, selection_end_x, selection_end_y
+    global drawing, draw_start_x, draw_start_y, draw_end_x, draw_end_y, dragging, drag_start_x, drag_start_y, zoom_factor, pan_x, pan_y, zoom_pan_active, zoom_pan_pause_time, cached_yolo_results, zoom_mode_active, stored_bounding_boxes, bounding_boxes, fullscreen, window, selection_complete, clipboard_message_active, clipboard_message_start_time, selection_start_x, selection_start_y, selection_end_x, selection_end_y, audio_muted
     if event == cv2.EVENT_RBUTTONDOWN:
         dragging = True
         zoom_pan_active = True
@@ -879,6 +900,13 @@ def mouse_callback(event, x, y, flags, param):
             bounding_boxes = copy.deepcopy(stored_bounding_boxes)
             stored_bounding_boxes = []
             print(f"Exiting zoom mode - restored {len(bounding_boxes)} objects")
+
+    if event == cv2.EVENT_MBUTTONDOWN:
+        audio_muted = not audio_muted
+        state = "muted" if audio_muted else "unmuted"
+        print(f"Audio {state} via middle mouse button")
+        with audio_waveform_lock:
+            audio_waveform.clear()
 
     if event == cv2.EVENT_MOUSEMOVE:
         if drawing:
@@ -1173,6 +1201,10 @@ print(
     f"DEBUG: First frame read result: ret={ret}, img shape={img.shape if img is not None else 'None'}"
 )
 
+# Initialize frame timeout tracking
+if ret:
+    last_frame_time = millis()
+
 print("DEBUG: Setting up window and getting stream size...")
 window = str(rtsp_stream)
 print("DEBUG: Getting stream width...")
@@ -1206,6 +1238,260 @@ cv2.resizeWindow(window, opsize[0], opsize[1])
 cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)
 cv2.setMouseCallback(window, mouse_callback)
 q = queue.Queue(maxsize=buffer)
+
+
+def start_audio_capture():
+    """Start background audio capture for playback and waveform visualization."""
+
+    global audio_thread, audio_visualization_enabled, audio_playback_enabled
+
+    if isinstance(rtsp_stream, int):
+        print("Audio playback disabled: webcam sources are not supported.")
+        return
+
+    if audio_thread and audio_thread.is_alive():
+        return
+
+    sd = None
+
+    try:
+        import av  # type: ignore
+        import numpy as _np  # Local import to avoid global dependency before background load
+    except ImportError:
+        print("Audio playback disabled: install 'av' for audio support.")
+        return
+
+    try:
+        import sounddevice as sd  # type: ignore
+    except ImportError:
+        print("Audio playback unavailable: install 'sounddevice' to enable speakers.")
+
+    def _audio_loop():
+        nonlocal _np
+        global audio_visualization_enabled, audio_playback_enabled
+        global audio_waveform, audio_waveform_downsample, audio_waveform_max_points
+        global audio_waveform_sample_rate, audio_muted
+
+        playback_stream = None
+        playback_ready = sd is not None
+
+        try:
+            container = av.open(rtsp_stream, options={"rtsp_transport": "tcp"})
+        except Exception as exc:
+            print(f"Audio playback disabled: unable to open stream ({exc}).")
+            return
+
+        audio_stream = next((s for s in container.streams if s.type == "audio"), None)
+
+        if audio_stream is None:
+            print("Audio playback disabled: no audio stream detected.")
+            container.close()
+            return
+
+        audio_stream.thread_type = "AUTO"
+        sample_rate = audio_stream.codec_context.sample_rate or 44100
+        channels = audio_stream.codec_context.channels or 1
+
+        audio_waveform_sample_rate = sample_rate
+        downsample = max(
+            1,
+            int(sample_rate * AUDIO_WAVEFORM_SECONDS / AUDIO_WAVEFORM_TARGET_POINTS),
+        )
+        max_points = max(1, int(sample_rate * AUDIO_WAVEFORM_SECONDS / downsample))
+
+        with audio_waveform_lock:
+            audio_waveform_downsample = downsample
+            audio_waveform_max_points = max_points
+            audio_waveform = deque(maxlen=audio_waveform_max_points)
+
+        if playback_ready:
+            try:
+                playback_stream = sd.OutputStream(
+                    samplerate=sample_rate,
+                    channels=channels,
+                    dtype="float32",
+                    latency="low",
+                )
+                playback_stream.start()
+                audio_playback_enabled = True
+            except Exception as exc:
+                print(f"Audio playback disabled: unable to open output device ({exc}).")
+                playback_stream = None
+                audio_playback_enabled = False
+        else:
+            audio_playback_enabled = False
+
+        audio_visualization_enabled = True
+
+        try:
+            for packet in container.demux(audio_stream):
+                if not loop:
+                    break
+
+                if packet.dts is None:
+                    continue
+
+                try:
+                    frames_iter = packet.decode()
+                except Exception as exc:
+                    print(f"Audio decode error: {exc}")
+                    continue
+
+                for frame in frames_iter:
+                    if frame is None:
+                        continue
+
+                    # Skip processing when muted to save CPU
+                    if audio_muted:
+                        continue
+
+                    try:
+                        samples = frame.to_ndarray()
+                    except Exception as exc:
+                        print(f"Audio frame conversion error: {exc}")
+                        continue
+
+                    if samples.size == 0:
+                        continue
+
+                    if samples.dtype == _np.int16:
+                        normalized = samples.astype(_np.float32) / 32768.0
+                    elif samples.dtype == _np.int32:
+                        normalized = samples.astype(_np.float32) / 2147483648.0
+                    elif samples.dtype == _np.uint8:
+                        normalized = (samples.astype(_np.float32) - 128.0) / 128.0
+                    elif samples.dtype == _np.float32:
+                        normalized = samples
+                    else:
+                        normalized = samples.astype(_np.float32)
+
+                    normalized = _np.clip(normalized, -1.0, 1.0)
+
+                    if normalized.ndim == 1:
+                        playback_chunk = normalized
+                    elif normalized.ndim == 2:
+                        if normalized.shape[0] == channels:
+                            playback_chunk = normalized.T
+                        elif normalized.shape[1] == channels:
+                            playback_chunk = normalized
+                        else:
+                            if channels > 1:
+                                playback_chunk = normalized.reshape(-1, channels)
+                            else:
+                                playback_chunk = normalized.reshape(-1)
+                    else:
+                        if channels > 1:
+                            playback_chunk = normalized.reshape(-1, channels)
+                        else:
+                            playback_chunk = normalized.reshape(-1)
+
+                    playback_chunk = _np.ascontiguousarray(playback_chunk, dtype=_np.float32)
+                    
+                    if playback_stream is not None:
+                        chunk_to_write = (
+                            playback_chunk
+                            if not audio_muted
+                            else _np.zeros_like(playback_chunk)
+                        )
+                        try:
+                            playback_stream.write(chunk_to_write)
+                        except Exception as exc:
+                            print(f"Audio playback error: {exc}")
+                            playback_stream.stop()
+                            playback_stream.close()
+                            playback_stream = None
+                            audio_playback_enabled = False
+
+                    if playback_chunk.ndim == 2:
+                        mono_samples = playback_chunk.mean(axis=1)
+                    else:
+                        mono_samples = playback_chunk
+
+                    mono_samples = _np.clip(mono_samples, -1.0, 1.0)
+
+                    downsample = max(1, audio_waveform_downsample)
+                    downsampled = mono_samples[::downsample]
+
+                    if downsampled.size == 0:
+                        continue
+
+                    with audio_waveform_lock:
+                        audio_waveform.extend(downsampled.tolist())
+        finally:
+            audio_visualization_enabled = False
+            audio_playback_enabled = False
+            if playback_stream is not None:
+                try:
+                    playback_stream.stop()
+                except Exception:
+                    pass
+                try:
+                    playback_stream.close()
+                except Exception:
+                    pass
+            container.close()
+
+    audio_thread = threading.Thread(target=_audio_loop, name="audio_capture", daemon=True)
+    audio_thread.start()
+
+
+start_audio_capture()
+
+
+def get_audio_waveform_offset(image_height):
+    if not audio_visualization_enabled or audio_muted or image_height <= 0:
+        return 0
+    return min(AUDIO_WAVEFORM_HEIGHT, max(30, image_height // 8))
+
+
+def draw_audio_waveform(img):
+    if not audio_visualization_enabled or audio_muted:
+        return img
+
+    try:
+        import numpy as np
+    except ImportError:
+        return img
+
+    with audio_waveform_lock:
+        data = list(audio_waveform)
+
+    if len(data) < 2:
+        return img
+
+    wave_height = get_audio_waveform_offset(img.shape[0])
+    if wave_height <= 0:
+        return img
+
+    base_y = img.shape[0] - 1
+    top_y = max(0, base_y - wave_height + 1)
+
+    overlay = img.copy()
+    cv2.rectangle(overlay, (0, top_y), (img.shape[1], base_y), (0, 40, 0), -1)
+    cv2.addWeighted(overlay, 0.35, img, 0.65, 0, img)
+
+    arr = np.array(data, dtype=np.float32)
+    if arr.size < 2:
+        return img
+
+    arr = np.clip(arr, -1.0, 1.0)
+
+    x_coords = np.linspace(0, img.shape[1] - 1, num=img.shape[1], dtype=np.int32)
+    sample_positions = np.linspace(0, arr.size - 1, num=img.shape[1])
+    samples = np.interp(sample_positions, np.arange(arr.size), arr)
+
+    center_y = top_y + wave_height // 2
+    amplitude_scale = max(1, (wave_height // 2) - 2)
+    y_coords = np.clip(
+        (center_y - (samples * amplitude_scale)).astype(np.int32),
+        top_y,
+        base_y,
+    )
+
+    pts = np.column_stack((x_coords, y_coords))
+    cv2.polylines(img, [pts], False, (80, 255, 80), 1, cv2.LINE_AA)
+
+    return img
 
 
 # Background loading function
@@ -1271,7 +1557,7 @@ yolo_thread.daemon = True
 yolo_thread.start()
 
 
-def get_clusters(detected_points, eps=30, min_samples=2):
+def get_clusters(detected_points, eps=50, min_samples=2):
     if not isinstance(detected_points, np.ndarray) or detected_points.size == 0:
         return {}
 
@@ -1314,31 +1600,92 @@ def add_to_replay_buffer(frame):
 
 
 def stream():
-    global cap, obj_idle, last_fskip
-    if cap.isOpened():
-        ret, frame = cap.read()
-        while loop:
-            ret, frame = cap.read()
-            if ret:
-                # Add frame to replay buffer when not in replay mode
-                if not replay_mode:
-                    add_to_replay_buffer(frame)
+    """Continuously read frames from the capture source with graceful reconnects."""
+    global cap, obj_idle, last_fskip, last_frame_time, stream_timeout_threshold, max_consecutive_failures
 
-                if (
-                    (obj_idle > 0)
-                    and obj_idle >= idle_reset
-                    and (timestamp() - last_fskip >= 30)
-                ):
-                    last_fskip = timestamp()
-                    q.queue.clear()
-                    obj_idle = 0
-                    # print(f"Frame skip")
-                else:
-                    q.put(frame)
-            else:
-                print("Can't receive frame, restarting video...")
+    consecutive_failures = 0
+    waiting_for_reconnect = False
+
+    while loop:
+        current_time = millis()
+
+        # If the capture is not open, keep trying to re-establish the connection
+        if cap is None or not cap.isOpened():
+            if not waiting_for_reconnect:
+                print("Stream disconnected. Attempting to reconnect...")
+                waiting_for_reconnect = True
+
+            if cap is not None:
                 cap.release()
-                cap = cv2.VideoCapture(rtsp_stream)
+
+            cap = cv2.VideoCapture(rtsp_stream)
+
+            if not cap.isOpened():
+                time.sleep(1.0)
+                continue
+
+            print("Stream reconnected.")
+            consecutive_failures = 0
+            waiting_for_reconnect = False
+            last_frame_time = current_time
+            q.queue.clear()
+
+            # Give the stream a short moment to produce valid frames
+            time.sleep(0.2)
+            continue
+
+        try:
+            ret, frame = cap.read()
+        except cv2.error as exc:
+            print(f"OpenCV read error: {exc}")
+            ret = False
+            frame = None
+
+        if ret and frame is not None:
+            # Update last successful frame time
+            last_frame_time = current_time
+            consecutive_failures = 0
+
+            # Add frame to replay buffer when not in replay mode
+            if not replay_mode:
+                add_to_replay_buffer(frame)
+
+            if (
+                (obj_idle > 0)
+                and obj_idle >= idle_reset
+                and (timestamp() - last_fskip >= 30)
+            ):
+                last_fskip = timestamp()
+                q.queue.clear()
+                obj_idle = 0
+            else:
+                q.put(frame)
+        else:
+            consecutive_failures += 1
+
+            # Check for early timeout detection
+            time_since_last_frame = current_time - last_frame_time
+
+            if (
+                consecutive_failures >= max_consecutive_failures
+                or time_since_last_frame > stream_timeout_threshold
+            ):
+                if time_since_last_frame > stream_timeout_threshold:
+                    print(
+                        f"Stream timeout detected ({time_since_last_frame}ms without frames), restarting video..."
+                    )
+                else:
+                    print("Can't receive frame, restarting video...")
+
+                cap.release()
+                consecutive_failures = 0
+                waiting_for_reconnect = True
+
+                # Avoid hammering the reconnect if the source is down
+                time.sleep(0.5)
+            else:
+                # Short delay before retry for temporary failures
+                time.sleep(0.05)
 
 
 def find_closest_point(points, point):
@@ -1449,6 +1796,11 @@ def process(photo):
     if zoom_pan_active or dragging or zoom_factor > 1.0:
         # Use last cached results during zoom/pan or when zoomed
         results = cached_yolo_results
+    elif yolo_skip_frames > 5:
+        # Skip YOLO processing entirely when processing every nth frame over 6
+        yolo_processing_happened = False
+        results = None
+        yolo_frame_count += 1
     else:
         # Run YOLO inference based on skip setting (0 = all frames, >0 = every nth frame)
         yolo_processing_happened = (
@@ -1843,6 +2195,58 @@ while loop:
         img = q.get_nowait()
         original_img = img.copy()  # Store original for clipboard
 
+        # Update main loop frame time for additional timeout detection
+        current_time = millis()
+        if last_frame_time > 0 and (current_time - last_frame_time) > stream_timeout_threshold:
+            print(f"Main loop timeout detected ({current_time - last_frame_time}ms since last frame)")
+
+            # Create connection lost screen with countdown
+            if img is not None:
+                # Convert to grayscale
+                lost_screen = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                lost_screen = cv2.cvtColor(lost_screen, cv2.COLOR_GRAY2BGR)
+
+                # Countdown from 3 to 1
+                for countdown in range(3, 0, -1):
+                    display_frame = lost_screen.copy()
+
+                    # Draw "CONNECTION LOST" text centered
+                    lost_text = "CONNECTION LOST"
+                    font_scale = 2.0
+                    thickness = 4
+                    text_size = cv2.getTextSize(lost_text, _font, font_scale, thickness)[0]
+                    text_x = (display_frame.shape[1] - text_size[0]) // 2
+                    text_y = (display_frame.shape[0] - text_size[1]) // 2
+
+                    # Black outline
+                    cv2.putText(display_frame, lost_text, (text_x, text_y), _font, font_scale, (0, 0, 0), thickness + 4)
+                    # Red text
+                    cv2.putText(display_frame, lost_text, (text_x, text_y), _font, font_scale, (0, 0, 255), thickness)
+
+                    # Draw countdown text below
+                    countdown_text = f"retrying in {countdown}..."
+                    countdown_font_scale = 1.0
+                    countdown_thickness = 2
+                    countdown_size = cv2.getTextSize(countdown_text, _font, countdown_font_scale, countdown_thickness)[0]
+                    countdown_x = (display_frame.shape[1] - countdown_size[0]) // 2
+                    countdown_y = text_y + text_size[1] + 40
+
+                    # Black outline
+                    cv2.putText(display_frame, countdown_text, (countdown_x, countdown_y), _font, countdown_font_scale, (0, 0, 0), countdown_thickness + 2)
+                    # White text
+                    cv2.putText(display_frame, countdown_text, (countdown_x, countdown_y), _font, countdown_font_scale, (255, 255, 255), countdown_thickness)
+
+                    cv2.imshow(str(rtsp_stream), display_frame)
+                    cv2.waitKey(1000)  # Wait 1 second
+
+                # After countdown, reconnect
+                print("Reconnecting stream...")
+                cap.release()
+                cap = cv2.VideoCapture(rtsp_stream)
+                last_frame_time = millis()
+                q.queue.clear()
+                time.sleep(0.5)  # Give stream time to initialize
+
     if img is not None:
 
         key = cv2.waitKey(1) & 0xFF
@@ -1917,15 +2321,21 @@ while loop:
             yolo_skip_frames = max(0, yolo_skip_frames - 1)
             show_frame_skip_display = True
             frame_skip_display_start_time = millis()
-            print(
-                f"Frame processing: {yolo_skip_frames + 1 if yolo_skip_frames > 0 else 'ALL'} frames"
-            )
+            if yolo_skip_frames == 0:
+                print("Frame processing: ALL frames")
+            elif yolo_skip_frames <= 5:
+                print(f"Frame processing: Every {yolo_skip_frames + 1} frames")
+            else:
+                print(f"Frame processing: Every {yolo_skip_frames + 1} frames (YOLO disabled)")
             q.queue.clear()
         elif key == ord("-"):  # - key (increase frame skip - less processing)
-            yolo_skip_frames = min(10, yolo_skip_frames + 1)
+            yolo_skip_frames = min(5, yolo_skip_frames + 1)  # Limit to 5 (process every 6 frames max)
             show_frame_skip_display = True
             frame_skip_display_start_time = millis()
-            print(f"Frame processing: Every {yolo_skip_frames + 1} frames")
+            if yolo_skip_frames <= 5:
+                print(f"Frame processing: Every {yolo_skip_frames + 1} frames")
+            else:
+                print(f"Frame processing: Every {yolo_skip_frames + 1} frames (YOLO disabled)")
             q.queue.clear()
 
         elif key == 9:  # Tab key - toggle info overlay
@@ -1982,6 +2392,10 @@ while loop:
                 prev_frames = frames
                 last_frame = millis()
 
+        waveform_offset = get_audio_waveform_offset(img.shape[0])
+        if waveform_offset > 0:
+            img = draw_audio_waveform(img)
+
         if replay_mode:
             _fps = "REPLAY MODE - LAG: 0ms"
         else:
@@ -1993,7 +2407,7 @@ while loop:
                 + "ms"
             )
 
-        text_y = img.shape[0] - 5
+        text_y = max(15, img.shape[0] - 5 - waveform_offset)
         cv2.putText(img, _fps, (16, text_y), _font, 0.4, (0, 0, 0), 2)
         if replay_mode:
             cv2.putText(
@@ -2004,18 +2418,20 @@ while loop:
 
         if recording:
             out.write(img)
-            cv2.putText(img, "REC", (16, img.shape[0] - 38), _font, 0.5, (0, 0, 0), 2)
-            cv2.putText(img, "REC", (16, img.shape[0] - 38), _font, 0.5, (0, 0, 255), 1)
+            rec_y = max(38, img.shape[0] - 38 - waveform_offset)
+            cv2.putText(img, "REC", (16, rec_y), _font, 0.5, (0, 0, 0), 2)
+            cv2.putText(img, "REC", (16, rec_y), _font, 0.5, (0, 0, 255), 1)
 
         bb = str(len(bounding_boxes))
 
+        tracking_y = max(26, img.shape[0] - 26 - waveform_offset)
         cv2.putText(
-            img, "Tracking: " + bb, (16, img.shape[0] - 26), _font, 0.4, (0, 0, 0), 2
+            img, "Tracking: " + bb, (16, tracking_y), _font, 0.4, (0, 0, 0), 2
         )
         cv2.putText(
             img,
             "Tracking: " + bb,
-            (16, img.shape[0] - 26),
+            (16, tracking_y),
             _font,
             0.4,
             (64, 255, 255),
@@ -2035,7 +2451,7 @@ while loop:
                 replay_text = "REPLAY"
                 text_size = cv2.getTextSize(replay_text, _font, 0.6, 2)[0]
                 text_x = img.shape[1] - text_size[0] - 10
-                text_y = img.shape[0] - 8
+                text_y = max(20, img.shape[0] - 8 - waveform_offset)
                 cv2.putText(
                     img, replay_text, (text_x, text_y), _font, 0.6, (0, 0, 0), 3
                 )
@@ -2046,7 +2462,7 @@ while loop:
             clock = datetime.now().strftime("%H:%M:%S")
             text_size = cv2.getTextSize(clock, _font, 0.5, 1)[0]
             text_x = img.shape[1] - text_size[0] - 10
-            text_y = img.shape[0] - 8
+            text_y = max(20, img.shape[0] - 8 - waveform_offset)
             cv2.putText(img, clock, (text_x, text_y), _font, 0.4, (0, 0, 0), 2)
             cv2.putText(img, clock, (text_x, text_y), _font, 0.4, (255, 255, 255), 1)
 
@@ -2144,8 +2560,10 @@ while loop:
             ):  # Show for 2 seconds
                 if yolo_skip_frames == 0:
                     skip_text = "Processing: ALL FRAMES"
-                else:
+                elif yolo_skip_frames <= 5:
                     skip_text = f"Processing: Every {yolo_skip_frames + 1} frames"
+                else:
+                    skip_text = f"Processing: Every {yolo_skip_frames + 1} frames (YOLO DISABLED)"
 
                 # Position at top center
                 text_size = cv2.getTextSize(skip_text, _font, 0.7, 2)[0]
@@ -2174,7 +2592,7 @@ while loop:
                     0
                 ]
                 text_x = (img.shape[1] - text_size[0]) // 2
-                text_y = img.shape[0] - 15  # Position at bottom with some margin
+                text_y = max(30, img.shape[0] - 15 - waveform_offset)
 
                 # Draw black outline for better visibility
                 cv2.putText(
